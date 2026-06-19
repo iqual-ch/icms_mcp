@@ -11,6 +11,7 @@ use Drupal\Core\Entity\EntityFieldManagerInterface;
 use Drupal\Core\Entity\EntityTypeBundleInfoInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
+use Drupal\Core\File\FileExists;
 use Drupal\Core\File\FileSystemInterface;
 use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
 use Drupal\Core\State\StateInterface;
@@ -1153,15 +1154,20 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         $fingerprint,
         $nonce,
       );
-      if (file_put_contents($filename, $json . PHP_EOL, LOCK_EX) === FALSE) {
+      $saved_uri = $this->fileSystem->saveData(
+        $json . PHP_EOL,
+        $filename,
+        FileExists::Error,
+      );
+      if ($saved_uri === FALSE) {
         throw new \RuntimeException("Could not write private pivot log '{$filename}'.");
       }
 
       $this->logger->notice('Saved received @operation pivot to @uri', [
         '@operation' => $operation,
-        '@uri' => $filename,
+        '@uri' => $saved_uri,
       ]);
-      return $filename;
+      return $saved_uri;
     }
     catch (\Throwable $e) {
       $this->logger->warning('Could not save received @operation pivot: @message', [
