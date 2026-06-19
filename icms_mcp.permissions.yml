@@ -1,0 +1,4 @@
+'use icms_mcp tools':
+  title: 'Use ICMS MCP tools'
+  description: 'Allows the bearer to call the icms_mcp:* tools (catalog, validate, import, lookup) via the Drupal MCP module. Grant only to the dedicated MCP service user the iqual drupal-bridge agent authenticates as.'
+  restrict access: true

@@ -1,0 +1,4 @@
+services:
+  logger.channel.icms_mcp:
+    parent: logger.channel_base
+    arguments: ['icms_mcp']
