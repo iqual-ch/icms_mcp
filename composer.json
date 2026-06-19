@@ -1,5 +1,5 @@
 {
-  "name": "iqual/icms-mcp",
+  "name": "iqual/icms_mcp",
   "description": "Drupal MCP tools for AI-powered, transactional ICMS content migration and import.",
   "type": "drupal-module",
   "license": "GPL-2.0-or-later",
