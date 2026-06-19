@@ -1,0 +1,20 @@
+{
+  "name": "iqual/icms-mcp",
+  "description": "Drupal MCP tools for AI-powered, transactional ICMS content migration and import.",
+  "type": "drupal-module",
+  "license": "GPL-2.0-or-later",
+  "require": {
+    "php": ">=8.1",
+    "drupal/core": "^10.3 || ^11",
+    "drupal/mcp": "^1.2",
+    "drupal/paragraphs": "^1.20"
+  },
+  "autoload": {
+    "psr-4": {
+      "Drupal\\icms_mcp\\": "src/"
+    }
+  },
+  "extra": {
+    "installer-name": "icms_mcp"
+  }
+}

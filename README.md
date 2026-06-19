@@ -86,10 +86,7 @@ import attempt.
 Requires `drupal/mcp ^1.0`.
 
 ```bash
-ddev composer require 'drupal/mcp:^1.0'
-ddev drush en mcp -y
-
-# Symlink (or copy) this folder into web/modules/custom/icms_mcp, then:
+ddev composer require 'iqual/icms_mcp'
 ddev drush en icms_mcp -y
 ```
 
@@ -100,15 +97,10 @@ ddev drush en icms_mcp -y
 2. Create a dedicated Drupal user for the agent. Grant **only** the
    `Use MCP server` permission (from drupal/mcp) and the
    `Use ICMS MCP tools` permission (from this module). No other roles.
-3. Wire the agent: set `DRUPAL_MCP_URL=https://<site>/mcp/post` and
-   `DRUPAL_MCP_TOKEN=<token>` on the `drupal-bridge` Vertex Runtime (or
-   inject via session state per `lib/tools/drupal_mcp.py`).
 
 ## Why a plugin and not a custom REST/JSON:API endpoint?
 
 Reuse + provenance. Every MCP-enabled client (Claude Desktop / Cursor / the
 ADK `McpToolset`) discovers the tools automatically, the auth + RBAC layer
 comes from `drupal/mcp`, and we get the streamable-HTTP transport, schema
-validation, and permission gating for free. The JSON:API path stays in the
-agent as a fallback for sites that don't have `drupal/mcp` installed yet
-(see `lib/tools/drupal_import.py`).
+validation, and permission gating for free.
