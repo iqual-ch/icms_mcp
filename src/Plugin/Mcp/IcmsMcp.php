@@ -399,6 +399,9 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         continue;
       }
       $defs = $this->fieldManager->getFieldDefinitions('paragraph', $bundle);
+      if (isset($para['options']) && !is_array($para['options'])) {
+        $issues[] = ['path' => "/drupal_import/paragraphs/{$i}/options", 'code' => 'invalid_options', 'message' => 'Blökkli options must be an object.'];
+      }
       foreach (($para['attributes'] ?? []) as $name => $value) {
         if (!isset($defs[$name])) {
           $issues[] = ['path' => "/drupal_import/paragraphs/{$i}/attributes/{$name}", 'code' => 'unknown_field', 'message' => "Field '{$name}' does not exist on paragraph:{$bundle}."];
@@ -636,6 +639,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
           [
             'type' => $para['type'] ?? '',
             'fields' => $para['attributes'] ?? [],
+            'options' => $para['options'] ?? [],
           ],
           $paragraph_storage,
           $child_paragraph_count,
@@ -740,6 +744,14 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       }
 
       $entity->set($name, $value);
+    }
+
+    $options = $spec['options'] ?? [];
+    if ($options) {
+      if (!is_array($options)) {
+        throw new \InvalidArgumentException("Blökkli options for paragraph '{$bundle}' must be an object.");
+      }
+      $entity->setBehaviorSettings('paragraphs_blokkli_data', $options);
     }
 
     $entity->save();

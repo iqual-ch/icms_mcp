@@ -7,6 +7,7 @@ dependencies:
   - drupal:system
   - drupal:node
   - drupal:paragraphs
+  - paragraphs_blokkli:paragraphs_blokkli
   - drupal:file
   - drupal:media
   - mcp:mcp
