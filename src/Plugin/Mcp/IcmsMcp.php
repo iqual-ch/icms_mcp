@@ -176,14 +176,26 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         return $this->jsonResponse($this->doGetCatalog());
       }
       if ($toolId === 'validate_pivot' || $toolId === md5('validate_pivot')) {
-        return $this->jsonResponse($this->doValidatePivot($arguments['pivot'] ?? []));
+        $pivot = $arguments['pivot'] ?? [];
+        $log_uri = $this->logReceivedPivot('validate_pivot', $pivot);
+        $result = $this->doValidatePivot($pivot);
+        if ($log_uri !== NULL) {
+          $result['pivot_log_uri'] = $log_uri;
+        }
+        return $this->jsonResponse($result);
       }
       if ($toolId === 'import_pivot' || $toolId === md5('import_pivot')) {
-        return $this->jsonResponse($this->doImportPivot(
-          $arguments['pivot'] ?? [],
+        $pivot = $arguments['pivot'] ?? [];
+        $log_uri = $this->logReceivedPivot('import_pivot', $pivot);
+        $result = $this->doImportPivot(
+          $pivot,
           (bool) ($arguments['dry_run'] ?? FALSE),
           (bool) ($arguments['approve'] ?? FALSE),
-        ));
+        );
+        if ($log_uri !== NULL) {
+          $result['pivot_log_uri'] = $log_uri;
+        }
+        return $this->jsonResponse($result);
       }
       if ($toolId === 'lookup_existing_node' || $toolId === md5('lookup_existing_node')) {
         return $this->jsonResponse($this->doLookupExistingNode((string) ($arguments['source_url'] ?? '')));
@@ -1100,6 +1112,64 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
 
   protected function layoutsFieldName(): string {
     return (string) $this->state->get('icms_mcp.layouts_field', self::DEFAULT_LAYOUTS_FIELD);
+  }
+
+  /**
+   * Persist an incoming pivot as JSON in Drupal's private filesystem.
+   *
+   * Logging is deliberately best-effort: a missing/misconfigured private
+   * filesystem must never prevent validation or import. Set the Drupal state
+   * key `icms_mcp.log_pivots` to FALSE to disable this diagnostic log.
+   */
+  protected function logReceivedPivot(string $operation, mixed $pivot): ?string {
+    if (!(bool) $this->state->get('icms_mcp.log_pivots', TRUE)) {
+      return NULL;
+    }
+
+    try {
+      $directory = 'private://icms_mcp/pivots';
+      if (!$this->fileSystem->prepareDirectory(
+        $directory,
+        FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS,
+      )) {
+        throw new \RuntimeException("Could not prepare private pivot log directory '{$directory}'.");
+      }
+
+      $json = json_encode(
+        [
+          'logged_at' => gmdate(DATE_ATOM),
+          'operation' => $operation,
+          'pivot' => $pivot,
+        ],
+        JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
+      );
+      $fingerprint = substr(hash('sha256', $json), 0, 12);
+      $nonce = bin2hex(random_bytes(3));
+      $filename = sprintf(
+        '%s/%s-%s-%s-%s.json',
+        $directory,
+        gmdate('Ymd-His'),
+        preg_replace('/[^a-z0-9_-]+/i', '-', $operation),
+        $fingerprint,
+        $nonce,
+      );
+      if (file_put_contents($filename, $json . PHP_EOL, LOCK_EX) === FALSE) {
+        throw new \RuntimeException("Could not write private pivot log '{$filename}'.");
+      }
+
+      $this->logger->notice('Saved received @operation pivot to @uri', [
+        '@operation' => $operation,
+        '@uri' => $filename,
+      ]);
+      return $filename;
+    }
+    catch (\Throwable $e) {
+      $this->logger->warning('Could not save received @operation pivot: @message', [
+        '@operation' => $operation,
+        '@message' => $e->getMessage(),
+      ]);
+      return NULL;
+    }
   }
 
   /**

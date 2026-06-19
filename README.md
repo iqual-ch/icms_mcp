@@ -59,6 +59,11 @@ ddev drush cr
   `conflict` / `error`) is logged to the `icms_mcp` logger channel with
   `idempotence_key`, `batch_id`, `run_id` in the context so you can correlate
   in `/admin/reports/dblog`.
+- **Private pivot log.** Every payload received by `validate_pivot` or
+  `import_pivot` is saved as formatted JSON under
+  `private://icms_mcp/pivots`. The resulting URI is returned as
+  `pivot_log_uri`. Disable this diagnostic log with
+  `drush state:set icms_mcp.log_pivots 0`.
 
 ## Prerequisites on the target site
 
