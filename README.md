@@ -49,7 +49,9 @@ ddev drush cr
     `status: skipped` without writing.
   - `update` / `skip-or-update` → load and rewrite the existing node, replacing
     its paragraph children (old paragraphs are deleted after the node save
-    commits, so a failure leaves the previous content intact).
+    commits, so a failure leaves the previous content intact). Cleanup uses
+    paragraph entity IDs rather than historical revision IDs, allowing an
+    update to repair a node that contains a stale paragraph revision reference.
   - `fail-if-exists` → returns `status: conflict` if a node with the same
     `idempotence_key` already exists.
 - **Transactional.** All writes run inside a `database->startTransaction()`.

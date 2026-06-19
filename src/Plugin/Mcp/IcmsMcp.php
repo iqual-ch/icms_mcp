@@ -603,6 +603,9 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     }
 
     if ($existing_nid !== NULL) {
+      // Avoid a stale entity from Drupal's static cache when another request
+      // has just created a new node revision.
+      $node_storage->resetCache([$existing_nid]);
       /** @var \Drupal\node\NodeInterface $node */
       $node = $node_storage->load($existing_nid);
       if ($node === NULL) {
@@ -611,11 +614,16 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       // Detach + delete the previous paragraph children so we don't leave
       // orphans behind on update. Paragraphs aren't deleted on detach alone.
       $layouts_field = $this->layoutsFieldName();
-      $old_refs = [];
+      $old_ref_ids = [];
       if ($node->hasField($layouts_field)) {
         foreach ($node->get($layouts_field) as $item) {
-          if ($item->entity !== NULL) {
-            $old_refs[] = $item->entity;
+          // Do not access `$item->entity`: entity_reference_revisions would
+          // load target_revision_id and abort the whole update when a stale
+          // paragraph revision is referenced. The stable paragraph entity ID
+          // is sufficient for best-effort cleanup after the node is saved.
+          $target_id = (int) ($item->target_id ?? 0);
+          if ($target_id > 0) {
+            $old_ref_ids[$target_id] = $target_id;
           }
         }
         $node->set($layouts_field, []);
@@ -623,7 +631,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     }
     else {
       $node = $node_storage->create(['type' => $node_bundle]);
-      $old_refs = [];
+      $old_ref_ids = [];
     }
 
     $this->applyNodeAttributes($node, $node_attrs);
@@ -657,6 +665,9 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
 
     // Delete the old paragraphs we detached, AFTER the node save committed
     // the new layout list — so a partial failure leaves the old node intact.
+    $old_refs = $paragraph_storage !== NULL && $old_ref_ids
+      ? $paragraph_storage->loadMultiple(array_values($old_ref_ids))
+      : [];
     foreach ($old_refs as $old) {
       try { $old->delete(); }
       catch (\Throwable $e) { /* best effort */ }
