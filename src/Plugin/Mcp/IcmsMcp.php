@@ -957,6 +957,9 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       return 'remote_video';
     }
     $extension = strtolower((string) pathinfo((string) parse_url($url, PHP_URL_PATH), PATHINFO_EXTENSION));
+    if ($extension === 'svg') {
+      return in_array('icon', $allowed, TRUE) ? 'icon' : NULL;
+    }
     if (in_array($extension, ['mp4', 'webm', 'mov', 'm4v'], TRUE) && in_array('video', $allowed, TRUE)) {
       return 'video';
     }
