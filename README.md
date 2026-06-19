@@ -5,16 +5,24 @@ case, the iqual `drupal-bridge` ADK agent on Cloud Run).
 
 ## What it ships
 
-Four tools. On the wire the names become `icms-mcp_<sanitized-tool-name>`
+Five tools. On the wire the names become `icms-mcp_<sanitized-tool-name>`
 (drupal/mcp prepends the plugin id and `_`; note the hyphen — see
 "Plugin ID gotcha" below):
 
 | Tool (wire name)                  | Purpose                                                                                  |
 | --------------------------------- | ---------------------------------------------------------------------------------------- |
-| `icms-mcp_get_icms_catalog`       | Live `nodeTypes` / `paragraphTypes` / `allowedParagraphBundles` introspected from this site. |
+| `icms-mcp_get_icms_catalog`       | Compact normalized v2 manifest with hash, indexes, capabilities, descriptions, fields and options. |
+| `icms-mcp_get_icms_component_contract` | Full contracts for selected node, paragraph or media bundles, optionally including paragraph children. |
 | `icms-mcp_validate_pivot`         | Drupal-side validation of an `icms-drupal-import-handoff-v1` pivot.                       |
 | `icms-mcp_import_pivot`           | Transactional create/update of node + paragraphs. Honours `strategy` and HITL gate.       |
 | `icms-mcp_lookup_existing_node`   | Idempotency lookup by canonical source URL (matches against the configured source-key field). |
+
+`get_icms_catalog` intentionally replaces the old expanded v1 response. Use
+`get_icms_component_contract` for details; clients should cache by
+`catalogHash`. Component guidance and option definitions ship under `resources/`,
+can be overridden through `icms_mcp.catalog_descriptions` and
+`icms_mcp.catalog_options`, and expose alter hooks documented in
+`icms_mcp.api.php`.
 
 ### Plugin ID gotcha
 

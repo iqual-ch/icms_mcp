@@ -1,4 +1,14 @@
 services:
+  icms_mcp.catalog_builder:
+    class: Drupal\icms_mcp\Catalog\IcmsCatalogBuilder
+    arguments:
+      - '@entity_type.manager'
+      - '@entity_type.bundle.info'
+      - '@entity_field.manager'
+      - '@config.factory'
+      - '@module_handler'
+      - '@extension.list.module'
+
   logger.channel.icms_mcp:
     parent: logger.channel_base
     arguments: ['icms_mcp']

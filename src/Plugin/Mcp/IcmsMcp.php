@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Drupal\icms_mcp\Plugin\Mcp;
 
+use Drupal\icms_mcp\Catalog\IcmsCatalogBuilder;
 use Drupal\Component\Datetime\TimeInterface;
 use Drupal\Core\Access\AccessResult;
 use Drupal\Core\Database\Connection;
@@ -27,7 +28,8 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
  * ICMS MCP plugin — catalog/validate/import/lookup tools for the iqual agent.
  *
  * Tools exposed:
- *   - get_icms_catalog: live node + paragraph + field introspection
+ *   - get_icms_catalog: compact normalized live catalog v2 manifest
+ *   - get_icms_component_contract: targeted resolved bundle contracts
  *   - validate_pivot: validate an icms-drupal-import-handoff-v1 contract
  *   - import_pivot: transactional create/update of node + paragraphs
  *   - lookup_existing_node: idempotency check by source URL
@@ -71,6 +73,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
   protected TimeInterface $time;
   protected ClientInterface $httpClient;
   protected FileSystemInterface $fileSystem;
+  protected IcmsCatalogBuilder $catalogBuilder;
 
   /**
    * {@inheritdoc}
@@ -92,6 +95,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     $instance->time = $container->get('datetime.time');
     $instance->httpClient = $container->get('http_client');
     $instance->fileSystem = $container->get('file_system');
+    $instance->catalogBuilder = $container->get('icms_mcp.catalog_builder');
     return $instance;
   }
 
@@ -102,11 +106,34 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     return [
       new Tool(
         name: 'get_icms_catalog',
-        description: 'Return the live ICMS catalog (nodeTypes, paragraphTypes, allowedParagraphBundles) for this site. The agent uses this in place of the bundled icms-catalog.json so a single deployment works across client sites with different bundle configurations.',
+        description: 'Return the compact normalized ICMS catalog v2 manifest: bundle indexes, capabilities, reusable field/option definitions, descriptions, and catalogHash.',
         inputSchema: [
           'type' => 'object',
           'properties' => (object) [],
           'required' => [],
+        ],
+      ),
+      new Tool(
+        name: 'get_icms_component_contract',
+        description: 'Resolve full live contracts for selected node, paragraph, or media bundles. Optionally includes nested paragraph child bundles.',
+        inputSchema: [
+          'type' => 'object',
+          'properties' => [
+            'entity_type' => [
+              'type' => 'string',
+              'enum' => ['node', 'paragraph', 'media'],
+            ],
+            'bundles' => [
+              'type' => 'array',
+              'items' => ['type' => 'string'],
+              'maxItems' => 25,
+            ],
+            'include_children' => [
+              'type' => 'boolean',
+              'default' => TRUE,
+            ],
+          ],
+          'required' => ['entity_type', 'bundles'],
         ],
       ),
       new Tool(
@@ -176,6 +203,13 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       if ($toolId === 'get_icms_catalog' || $toolId === md5('get_icms_catalog')) {
         return $this->jsonResponse($this->doGetCatalog());
       }
+      if ($toolId === 'get_icms_component_contract' || $toolId === md5('get_icms_component_contract')) {
+        return $this->jsonResponse($this->catalogBuilder->buildComponentContracts(
+          (string) ($arguments['entity_type'] ?? ''),
+          is_array($arguments['bundles'] ?? NULL) ? $arguments['bundles'] : [],
+          (bool) ($arguments['include_children'] ?? TRUE),
+        ));
+      }
       if ($toolId === 'validate_pivot' || $toolId === md5('validate_pivot')) {
         $pivot = $arguments['pivot'] ?? [];
         $log_uri = $this->logReceivedPivot('validate_pivot', $pivot);
@@ -225,68 +259,12 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
 
   // ---- Tool: get_icms_catalog ----------------------------------------------
 
-  /**
-   * Return live introspection of node + paragraph bundles on this site.
-   *
-   * Shape mirrors `backend/agents/content-migrator/icms-catalog.json` so the
-   * orchestrator can swap the bundled catalog for live data without changing
-   * downstream tools (`suggest_icms_layout_mapping`, `build_icms_page_pivot_v1`).
-   */
+  /** Return the compact normalized live catalog v2 manifest. */
   protected function doGetCatalog(): array {
-    $node_types = [];
-    $node_bundles = $this->bundleInfo->getBundleInfo('node');
-    foreach ($node_bundles as $bundle => $info) {
-      $fields = $this->describeFields('node', $bundle);
-      $node_types[$bundle] = [
-        'id' => $bundle,
-        'label' => (string) ($info['label'] ?? $bundle),
-        'fields' => $fields,
-        'paragraphFields' => [],
-      ];
-    }
-
-    $paragraph_types = [];
-    if ($this->entityTypeManager->hasDefinition('paragraph')) {
-      $paragraph_bundles = $this->bundleInfo->getBundleInfo('paragraph');
-      foreach ($paragraph_bundles as $bundle => $info) {
-        $paragraph_types[$bundle] = [
-          'id' => $bundle,
-          'label' => (string) ($info['label'] ?? $bundle),
-          'fields' => $this->describeFields('paragraph', $bundle),
-        ];
-      }
-    }
-
-    // Discover which paragraph bundles are allowed on an icms_page via the
-    // configured layouts field. This is what the agent calls
-    // `allowedParagraphBundles` in the bundled catalog.
-    $allowed = [];
-    $layouts_field = $this->layoutsFieldName();
-    if (isset($node_bundles['icms_page'])) {
-      $defs = $this->fieldManager->getFieldDefinitions('node', 'icms_page');
-      if (isset($defs[$layouts_field])) {
-        $settings = $defs[$layouts_field]->getSetting('handler_settings') ?? [];
-        $target = $settings['target_bundles'] ?? [];
-        $allowed = array_keys($target);
-        sort($allowed);
-        $node_types['icms_page']['paragraphFields'][$layouts_field] = [
-          'cardinality' => $defs[$layouts_field]->getFieldStorageDefinition()->getCardinality(),
-          'targetBundles' => $allowed,
-        ];
-      }
-    }
-
-    return [
-      'status' => 'ok',
-      'format' => 'icms-target-catalog-v1',
-      'site' => [
-        'source_key_field' => $this->sourceKeyFieldName(),
-        'layouts_field' => $layouts_field,
-      ],
-      'nodeTypes' => $node_types,
-      'paragraphTypes' => $paragraph_types,
-      'allowedParagraphBundles' => $allowed,
-    ];
+    return $this->catalogBuilder->buildManifest(
+      $this->sourceKeyFieldName(),
+      $this->layoutsFieldName(),
+    );
   }
 
   /**

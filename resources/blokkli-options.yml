@@ -1,0 +1,18 @@
+options:
+  width: { values: [narrow, medium, wide], description: "Content width; wide is the full-width default." }
+  spacingTop: { values: [none, small, large] }
+  spacingBottom: { values: [none, small, large] }
+  colorScheme: { values: [none, light, accent, dark] }
+  colorMode: { values: [none, light, dark] }
+  imageFormat: { values: [auto, landscape, portrait] }
+  alignHorizontalFull: { values: [left, center, right] }
+  alignHorizontalReduced: { values: [left, center, right] }
+  alignVerticalFull: { values: [top, center, bottom] }
+  alignVerticalReduced: { values: [top, center, bottom] }
+  slider: { values: [true, false] }
+  sliderColumns: { values: [1, 2, 3, 4] }
+  cardVariant: { values: [] }
+  teaserStyle: { values: [] }
+  teaserVariant: { values: [] }
+  textColumns: { values: [one, two, three] }
+  textShadow: { values: [none, light, dark, darker] }
