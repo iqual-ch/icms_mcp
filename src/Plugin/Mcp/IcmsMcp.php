@@ -778,33 +778,42 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       throw new \RuntimeException('No supported media bundle is allowed for remote media URL ' . $url);
     }
 
-    $media_defs = $this->fieldManager->getFieldDefinitions('media', $bundle);
+    /** @var \Drupal\media\MediaTypeInterface|null $media_type */
+    $media_type = $this->entityTypeManager->getStorage('media_type')->load($bundle);
+    if ($media_type === NULL) {
+      throw new \RuntimeException("Media type '{$bundle}' does not exist.");
+    }
+    $source_definition = $media_type->getSource()->getSourceFieldDefinition($media_type);
+    if ($source_definition === NULL) {
+      throw new \RuntimeException("Media type '{$bundle}' has no configured source field.");
+    }
+    $source_field = $source_definition->getName();
+    $source_type = $source_definition->getType();
+
     if ($bundle === 'remote_video') {
-      foreach ($media_defs as $field_name => $field_def) {
-        if (in_array($field_def->getType(), ['string', 'string_long', 'link'], TRUE) && str_contains($field_name, 'oembed')) {
-          $media = $this->entityTypeManager->getStorage('media')->create([
-            'bundle' => $bundle,
-            'name' => (string) ($value['alt'] ?? $value['title'] ?? basename((string) parse_url($url, PHP_URL_PATH)) ?: 'Remote video'),
-            'status' => 1,
-          ]);
-          $media->set($field_name, $url);
-          $media->save();
-          return (int) $media->id();
-        }
+      $existing_media = $this->entityTypeManager->getStorage('media')->getQuery()
+        ->accessCheck(FALSE)
+        ->condition('bundle', $bundle)
+        ->condition($source_type === 'link' ? $source_field . '.uri' : $source_field, $url)
+        ->range(0, 1)
+        ->execute();
+      if ($existing_media) {
+        return (int) reset($existing_media);
       }
-      throw new \RuntimeException("No oEmbed source field found on media:{$bundle}.");
+      $media = $this->entityTypeManager->getStorage('media')->create([
+        'bundle' => $bundle,
+        'name' => $this->mediaName($value, $url),
+        'status' => 1,
+      ]);
+      $media->set($source_field, $source_type === 'link' ? ['uri' => $url] : $url);
+      $this->validateAndSaveMedia($media);
+      return (int) $media->id();
     }
 
-    $source_field = NULL;
-    $wanted_type = $bundle === 'image' ? 'image' : 'file';
-    foreach ($media_defs as $field_name => $field_def) {
-      if ($field_def->getType() === $wanted_type) {
-        $source_field = $field_name;
-        break;
-      }
-    }
-    if ($source_field === NULL) {
-      throw new \RuntimeException("No {$wanted_type} source field found on media:{$bundle}.");
+    if (!in_array($source_type, ['image', 'file'], TRUE)) {
+      throw new \RuntimeException(
+        "Unsupported source field type '{$source_type}' on media:{$bundle}."
+      );
     }
 
     $file = $this->downloadRemoteFile($url);
@@ -820,17 +829,72 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
 
     $media = $this->entityTypeManager->getStorage('media')->create([
       'bundle' => $bundle,
-      'name' => (string) ($value['alt'] ?? $value['title'] ?? $file->getFilename()),
+      'name' => $this->mediaName($value, $url, $file),
       'status' => 1,
     ]);
     $field_value = ['target_id' => $file->id()];
-    if ($wanted_type === 'image') {
-      $field_value['alt'] = (string) ($value['alt'] ?? '');
-      $field_value['title'] = (string) ($value['title'] ?? '');
+    if ($source_type === 'image') {
+      $field_value['alt'] = $this->firstNonEmptyString([
+        $value['alt'] ?? NULL,
+        $value['title'] ?? NULL,
+        $this->mediaName($value, $url, $file),
+      ]);
+      $field_value['title'] = $this->firstNonEmptyString([$value['title'] ?? NULL]);
     }
     $media->set($source_field, $field_value);
-    $media->save();
+    $this->validateAndSaveMedia($media);
     return (int) $media->id();
+  }
+
+  /**
+   * Return a human-readable media name, ignoring present-but-empty values.
+   */
+  protected function mediaName(array $value, string $url, ?\Drupal\file\FileInterface $file = NULL): string {
+    $url_filename = basename((string) parse_url($url, PHP_URL_PATH));
+    // Some source URLs are encoded twice (for example `%2520`). Decode a
+    // bounded number of times without turning this into an open-ended loop.
+    for ($i = 0; $i < 2; $i++) {
+      $decoded = rawurldecode($url_filename);
+      if ($decoded === $url_filename) {
+        break;
+      }
+      $url_filename = $decoded;
+    }
+    return $this->firstNonEmptyString([
+      $value['alt'] ?? NULL,
+      $value['title'] ?? NULL,
+      $value['filename'] ?? NULL,
+      $file?->getFilename(),
+      $url_filename,
+      'Imported media',
+    ]);
+  }
+
+  /**
+   * Return the first non-empty scalar string from a list of candidates.
+   */
+  protected function firstNonEmptyString(array $values): string {
+    foreach ($values as $value) {
+      if (is_scalar($value) && trim((string) $value) !== '') {
+        return trim((string) $value);
+      }
+    }
+    return '';
+  }
+
+  /**
+   * Validate a media entity before saving so a missing source is never silent.
+   */
+  protected function validateAndSaveMedia(\Drupal\media\MediaInterface $media): void {
+    $violations = $media->validate();
+    if ($violations->count() > 0) {
+      $messages = [];
+      foreach ($violations as $violation) {
+        $messages[] = $violation->getPropertyPath() . ': ' . $violation->getMessage();
+      }
+      throw new \RuntimeException('Media validation failed: ' . implode('; ', $messages));
+    }
+    $media->save();
   }
 
   /**
@@ -848,9 +912,9 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     $uri = $directory . '/' . hash('sha256', $url) . $extension;
 
     $existing = $this->entityTypeManager->getStorage('file')->loadByProperties(['uri' => $uri]);
-    if ($existing) {
+    $file = $existing ? reset($existing) : NULL;
+    if ($file !== NULL && file_exists($uri) && filesize($uri) > 0) {
       /** @var \Drupal\file\FileInterface $file */
-      $file = reset($existing);
       return $file;
     }
 
@@ -864,14 +928,20 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     if ($data === '') {
       throw new \RuntimeException("Remote media '{$url}' returned an empty body.");
     }
-    if (file_put_contents($uri, $data) === FALSE) {
+    $saved_uri = $this->fileSystem->saveData($data, $uri, FileExists::Replace);
+    if ($saved_uri === FALSE) {
       throw new \RuntimeException("Could not write remote media to '{$uri}'.");
+    }
+
+    // Reuse an existing managed file entity whose physical file was missing.
+    if ($file !== NULL) {
+      return $file;
     }
 
     /** @var \Drupal\file\FileInterface $file */
     $file = $this->entityTypeManager->getStorage('file')->create([
-      'filename' => basename($path) ?: basename($uri),
-      'uri' => $uri,
+      'filename' => $this->mediaName([], $url),
+      'uri' => $saved_uri,
       'status' => 1,
     ]);
     $file->save();
