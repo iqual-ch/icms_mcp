@@ -299,6 +299,10 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       'required' => $def->isRequired(),
       'cardinality' => $cardinality,
     ];
+    $max_length = $def->getSetting('max_length');
+    if (is_numeric($max_length) && (int) $max_length > 0) {
+      $info['maxLength'] = (int) $max_length;
+    }
     // For entity_reference-style fields, surface the target bundles too — the
     // agent needs this to know which paragraph types can sit in which slot.
     if (in_array($type, ['entity_reference', 'entity_reference_revisions'], TRUE)) {
@@ -625,7 +629,11 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       $child_paragraph_count,
       $media_count,
     );
-    $node->set($this->sourceKeyFieldName(), $idempotence_key);
+    $source_key_field = $this->sourceKeyFieldName();
+    $node->set(
+      $source_key_field,
+      $this->normalizeFieldValue($node->getFieldDefinition($source_key_field), $idempotence_key),
+    );
     if ($paragraphs && $paragraph_storage !== NULL) {
       $sorted = $this->sortParagraphsBySequence($paragraphs);
       foreach ($sorted as $para) {
@@ -740,7 +748,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         continue;
       }
 
-      $entity->set($name, $value);
+      $entity->set($name, $this->normalizeFieldValue($definition, $value));
     }
 
     $options = $spec['options'] ?? [];
@@ -843,12 +851,15 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     ]);
     $field_value = ['target_id' => $file->id()];
     if ($source_type === 'image') {
-      $field_value['alt'] = $this->firstNonEmptyString([
+      $field_value['alt'] = $this->truncateString($this->firstNonEmptyString([
         $value['alt'] ?? NULL,
         $value['title'] ?? NULL,
         $this->mediaName($value, $url, $file),
-      ]);
-      $field_value['title'] = $this->firstNonEmptyString([$value['title'] ?? NULL]);
+      ]), 512);
+      $field_value['title'] = $this->truncateString(
+        $this->firstNonEmptyString([$value['title'] ?? NULL]),
+        1024,
+      );
     }
     $media->set($source_field, $field_value);
     $this->validateAndSaveMedia($media);
@@ -880,7 +891,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     // Drupal media names are strings with a hard 255-character limit. Keep
     // the complete alt text on the image field, but bound the administrative
     // media entity label independently.
-    return mb_strlen($name) > 255 ? mb_substr($name, 0, 254) . '…' : $name;
+    return $this->truncateString($name, 255);
   }
 
   /**
@@ -893,6 +904,47 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       }
     }
     return '';
+  }
+
+  /** Truncate a Unicode string to a hard storage limit. */
+  protected function truncateString(string $value, int $max_length): string {
+    if ($max_length <= 0 || mb_strlen($value) <= $max_length) {
+      return $value;
+    }
+    return $max_length === 1 ? '…' : mb_substr($value, 0, $max_length - 1) . '…';
+  }
+
+  /** Normalize values according to live field storage constraints. */
+  protected function normalizeFieldValue(FieldDefinitionInterface $definition, mixed $value): mixed {
+    $field_type = $definition->getType();
+    $max_length = (int) ($definition->getSetting('max_length') ?? 0);
+    if ($max_length > 0 && in_array($field_type, ['string', 'string_long'], TRUE)) {
+      if (is_string($value)) {
+        return $this->truncateString($value, $max_length);
+      }
+      if (is_array($value)) {
+        foreach ($value as &$item) {
+          if (is_string($item)) {
+            $item = $this->truncateString($item, $max_length);
+          }
+          elseif (is_array($item) && isset($item['value']) && is_string($item['value'])) {
+            $item['value'] = $this->truncateString($item['value'], $max_length);
+          }
+        }
+        unset($item);
+      }
+    }
+    if ($field_type === 'link' && is_array($value)) {
+      $items = array_is_list($value) ? $value : [$value];
+      foreach ($items as &$item) {
+        if (is_array($item) && isset($item['title']) && is_string($item['title'])) {
+          $item['title'] = $this->truncateString($item['title'], 255);
+        }
+      }
+      unset($item);
+      return array_is_list($value) ? $items : ($items[0] ?? $value);
+    }
+    return $value;
   }
 
   /**
@@ -1073,7 +1125,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     int &$media_count,
   ): void {
     if (isset($attrs['title'])) {
-      $node->setTitle((string) $attrs['title']);
+      $node->setTitle($this->truncateString((string) $attrs['title'], 255));
     }
     if (isset($attrs['langcode']) && $node->hasField('langcode')) {
       $node->set('langcode', $attrs['langcode']);
@@ -1137,7 +1189,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
           $node->set($name, $references);
         }
         else {
-          $node->set($name, $value);
+          $node->set($name, $this->normalizeFieldValue($definition, $value));
         }
       }
     }

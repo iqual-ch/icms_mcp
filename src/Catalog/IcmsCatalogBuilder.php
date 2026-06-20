@@ -161,11 +161,13 @@ final class IcmsCatalogBuilder {
 
   private function storageDefinition(FieldDefinitionInterface $definition): array {
     $storage = $definition->getFieldStorageDefinition();
+    $maxLength = $definition->getSetting('max_length');
     return array_filter([
       'fieldName' => $definition->getName(),
       'fieldType' => $definition->getType(),
       'cardinality' => $storage->getCardinality(),
       'targetType' => $definition->getSetting('target_type') ?: NULL,
+      'maxLength' => is_numeric($maxLength) && (int) $maxLength > 0 ? (int) $maxLength : NULL,
     ], fn(mixed $value): bool => $value !== NULL);
   }
 
@@ -183,7 +185,31 @@ final class IcmsCatalogBuilder {
     if ($allowedFormats) {
       $data['allowedFormats'] = array_values($allowedFormats);
     }
+    $propertyMaxLengths = $this->propertyMaxLengths($definition);
+    if ($propertyMaxLengths) {
+      $data['propertyMaxLengths'] = $propertyMaxLengths;
+    }
     return $data;
+  }
+
+  /** Return per-property string limits exposed by Drupal typed data. */
+  private function propertyMaxLengths(FieldDefinitionInterface $definition): array {
+    $limits = [];
+    foreach ($definition->getItemDefinition()->getPropertyDefinitions() as $name => $property) {
+      foreach ($property->getConstraints() as $constraint => $options) {
+        if ($constraint !== 'Length' || !is_array($options) || empty($options['max'])) {
+          continue;
+        }
+        $limits[(string) $name] = (int) $options['max'];
+      }
+    }
+    // Core's media thumbnail/image schema uses these database limits even on
+    // installations where typed-data constraints do not expose them.
+    if ($definition->getType() === 'image') {
+      $limits += ['alt' => 512, 'title' => 1024];
+    }
+    ksort($limits);
+    return $limits;
   }
 
   private function childBundles(array $fields): array {
