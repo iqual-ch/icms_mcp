@@ -911,7 +911,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
    */
   protected function downloadRemoteFile(string $url): \Drupal\file\FileInterface {
     $path = (string) parse_url($url, PHP_URL_PATH);
-    $extension = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
+    $extension = $this->mediaExtensionFromPath($path);
     $extension = preg_match('/^[a-z0-9]{1,8}$/', $extension) ? '.' . $extension : '';
     $directory = 'public://icms_mcp';
     $this->fileSystem->prepareDirectory(
@@ -965,7 +965,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     if (in_array('remote_video', $allowed, TRUE) && preg_match('/(?:youtube\.com|youtu\.be|vimeo\.com)$/', $host)) {
       return 'remote_video';
     }
-    $extension = strtolower((string) pathinfo((string) parse_url($url, PHP_URL_PATH), PATHINFO_EXTENSION));
+    $extension = $this->mediaExtensionFromPath((string) parse_url($url, PHP_URL_PATH));
     if ($extension === 'svg') {
       return in_array('icon', $allowed, TRUE) ? 'icon' : NULL;
     }
@@ -976,6 +976,23 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       return 'image';
     }
     return $allowed[0] ?? NULL;
+  }
+
+  /**
+   * Detect an asset extension even when a CDN appends transform path segments.
+   *
+   * Example: Storyblok uses `photo.jpg/m/100x69/filters:format(webp)`;
+   * pathinfo() sees no extension because the final segment is the filter.
+   */
+  protected function mediaExtensionFromPath(string $path): string {
+    if (preg_match('/filters:format\((png|gif|jpe?g|webp)\)/i', $path, $format_match)) {
+      return strtolower($format_match[1]);
+    }
+    if (preg_match_all('/\.(svg|png|gif|jpe?g|webp|mp4|webm|mov|m4v)(?:\/|$)/i', $path, $matches) && !empty($matches[1])) {
+      return strtolower((string) end($matches[1]));
+    }
+    $extension = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
+    return preg_match('/^[a-z0-9]{1,8}$/', $extension) ? $extension : '';
   }
 
   /**
