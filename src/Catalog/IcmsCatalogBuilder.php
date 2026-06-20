@@ -67,20 +67,23 @@ final class IcmsCatalogBuilder {
     }
     ksort($fieldDefinitions);
 
-    $allowed = [];
-    $paragraphSlots = [];
-    $nodeDefinitions = $this->fieldManager->getFieldDefinitions('node', 'icms_page');
-    if (isset($nodeDefinitions[$layoutsField])) {
-      $allowed = array_keys($nodeDefinitions[$layoutsField]->getSetting('handler_settings')['target_bundles'] ?? []);
-      sort($allowed);
-      $paragraphSlots[$layoutsField] = [
-        'fieldRef' => 'node.' . $layoutsField,
-        'targetBundles' => $allowed,
-      ];
+    $allowedByNodeType = [];
+    foreach (array_keys($indexes['nodeTypes']) as $nodeBundle) {
+      $nodeDefinitions = $this->fieldManager->getFieldDefinitions('node', $nodeBundle);
+      $paragraphSlots = [];
+      if (isset($nodeDefinitions[$layoutsField])) {
+        $allowed = array_keys($nodeDefinitions[$layoutsField]->getSetting('handler_settings')['target_bundles'] ?? []);
+        sort($allowed);
+        $paragraphSlots[$layoutsField] = [
+          'fieldRef' => 'node.' . $layoutsField,
+          'targetBundles' => $allowed,
+        ];
+        $allowedByNodeType[$nodeBundle] = $allowed;
+      }
+      $indexes['nodeTypes'][$nodeBundle]['paragraphSlots'] = $paragraphSlots;
     }
-    if (isset($indexes['nodeTypes']['icms_page'])) {
-      $indexes['nodeTypes']['icms_page']['paragraphSlots'] = $paragraphSlots;
-    }
+    ksort($allowedByNodeType);
+    $allowed = $allowedByNodeType['icms_page'] ?? [];
 
     $manifest = [
       'status' => 'ok',
@@ -92,6 +95,7 @@ final class IcmsCatalogBuilder {
       'paragraphTypes' => $indexes['paragraphTypes'],
       'mediaTypes' => $indexes['mediaTypes'],
       'allowedParagraphBundles' => $allowed,
+      'allowedParagraphBundlesByNodeType' => $allowedByNodeType,
     ];
     $manifest['catalogHash'] = $this->stableHash($manifest);
     return $manifest;

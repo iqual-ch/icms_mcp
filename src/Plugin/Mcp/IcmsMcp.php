@@ -345,6 +345,9 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     }
 
     $node_attrs = $node['attributes'] ?? [];
+    $para_bundles = $this->entityTypeManager->hasDefinition('paragraph')
+      ? $this->bundleInfo->getBundleInfo('paragraph')
+      : [];
     if (empty($node_attrs['title'])) {
       $issues[] = ['path' => '/drupal_import/node/attributes/title', 'code' => 'missing', 'message' => 'title is required.'];
     }
@@ -357,14 +360,13 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         }
         if (!isset($node_defs[$name])) {
           $issues[] = ['path' => "/drupal_import/node/attributes/{$name}", 'code' => 'unknown_field', 'message' => "Field '{$name}' does not exist on node:{$node_bundle}."];
+          continue;
         }
+        $this->validateStructuredField($node_defs[$name], $value, "/drupal_import/node/attributes/{$name}", $para_bundles, $issues);
       }
     }
 
     $paragraphs = $import['paragraphs'] ?? [];
-    $para_bundles = $this->entityTypeManager->hasDefinition('paragraph')
-      ? $this->bundleInfo->getBundleInfo('paragraph')
-      : [];
     foreach ($paragraphs as $i => $para) {
       $type_raw = $para['type'] ?? '';
       $bundle = $this->stripJsonApiPrefix($type_raw);
@@ -612,12 +614,18 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       $old_ref_ids = [];
     }
 
-    $this->applyNodeAttributes($node, $node_attrs);
-    $node->set($this->sourceKeyFieldName(), $idempotence_key);
-
     $created_paragraphs = [];
     $child_paragraph_count = 0;
     $media_count = 0;
+    $this->applyNodeAttributes(
+      $node,
+      $node_attrs,
+      $paragraph_storage,
+      $old_ref_ids,
+      $child_paragraph_count,
+      $media_count,
+    );
+    $node->set($this->sourceKeyFieldName(), $idempotence_key);
     if ($paragraphs && $paragraph_storage !== NULL) {
       $sorted = $this->sortParagraphsBySequence($paragraphs);
       foreach ($sorted as $para) {
@@ -1035,7 +1043,14 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
    * canonical structured shape; everything else is set verbatim if the field
    * exists, ignored otherwise (validation already flagged unknowns).
    */
-  protected function applyNodeAttributes(\Drupal\node\NodeInterface $node, array $attrs): void {
+  protected function applyNodeAttributes(
+    \Drupal\node\NodeInterface $node,
+    array $attrs,
+    $paragraph_storage,
+    array &$old_ref_ids,
+    int &$child_paragraph_count,
+    int &$media_count,
+  ): void {
     if (isset($attrs['title'])) {
       $node->setTitle((string) $attrs['title']);
     }
@@ -1059,7 +1074,50 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         continue;
       }
       if ($node->hasField($name)) {
-        $node->set($name, $value);
+        $definition = $node->getFieldDefinition($name);
+        if ($definition->getType() === 'entity_reference_revisions' && $definition->getSetting('target_type') === 'paragraph') {
+          if ($paragraph_storage === NULL) {
+            throw new \RuntimeException("Node field '{$name}' requires paragraphs, but the paragraphs module is unavailable.");
+          }
+          foreach ($node->get($name) as $existing_item) {
+            $target_id = (int) ($existing_item->target_id ?? 0);
+            if ($target_id > 0) {
+              $old_ref_ids[$target_id] = $target_id;
+            }
+          }
+          $references = [];
+          foreach ($this->normalizeList($value) as $child_spec) {
+            if (!is_array($child_spec)) {
+              throw new \InvalidArgumentException("Child value for node field '{$name}' must be an object.");
+            }
+            $child = $this->createParagraphFromSpec(
+              $child_spec,
+              $paragraph_storage,
+              $child_paragraph_count,
+              $media_count,
+            );
+            $references[] = [
+              'target_id' => $child->id(),
+              'target_revision_id' => $child->getRevisionId(),
+            ];
+            $child_paragraph_count++;
+          }
+          $node->set($name, $references);
+        }
+        elseif ($definition->getType() === 'entity_reference' && $definition->getSetting('target_type') === 'media') {
+          $references = [];
+          foreach ($this->normalizeList($value) as $media_spec) {
+            $target_id = $this->resolveMediaReference($media_spec, $definition);
+            if ($target_id !== NULL) {
+              $references[] = ['target_id' => $target_id];
+              $media_count++;
+            }
+          }
+          $node->set($name, $references);
+        }
+        else {
+          $node->set($name, $value);
+        }
       }
     }
   }

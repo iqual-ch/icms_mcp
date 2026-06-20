@@ -1,4 +1,14 @@
 descriptions:
+  node:
+    icms_page: { summary: "General editorial page when no more specific structured content type applies." }
+    icms_news: { summary: "Dated news or blog detail article; use for an individual story, not a news listing." }
+    icms_event: { summary: "Event detail with one or more scheduled occurrences; use only when a concrete date or event schema is present." }
+    icms_project: { summary: "Project or case-study detail describing a bounded initiative, programme or completed engagement." }
+    icms_pressrelease: { summary: "Official press release detail, distinct from ordinary editorial news." }
+    icms_product: { summary: "Product detail page for one identifiable offering." }
+    icms_people: { summary: "Individual person or team-member profile, not a team listing." }
+    icms_location: { summary: "Individual physical location with address or coordinates." }
+    icms_contenthub: { summary: "Long-form Content Hub article when the site distinguishes it from ordinary news." }
   paragraph:
     icms_layout_2_col_text_elements: { role: layout, summary: "Two-column collection of key questions or paired text elements; unlike FAQ it does not require disclosure answers.", minItems: 2 }
     icms_layout_call_to_action: { role: layout, summary: "Prominent conversion section combining a concise message with one or more action buttons." }
