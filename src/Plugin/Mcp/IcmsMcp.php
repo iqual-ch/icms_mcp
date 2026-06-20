@@ -869,7 +869,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       }
       $url_filename = $decoded;
     }
-    return $this->firstNonEmptyString([
+    $name = $this->firstNonEmptyString([
       $value['alt'] ?? NULL,
       $value['title'] ?? NULL,
       $value['filename'] ?? NULL,
@@ -877,6 +877,10 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       $url_filename,
       'Imported media',
     ]);
+    // Drupal media names are strings with a hard 255-character limit. Keep
+    // the complete alt text on the image field, but bound the administrative
+    // media entity label independently.
+    return mb_strlen($name) > 255 ? mb_substr($name, 0, 254) . '…' : $name;
   }
 
   /**
