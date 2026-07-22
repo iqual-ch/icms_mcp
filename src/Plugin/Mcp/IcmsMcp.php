@@ -754,6 +754,11 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         continue;
       }
 
+      if ($field_type === 'tablefield') {
+        $entity->set($name, $this->buildTablefieldValue($value, $name, $bundle));
+        continue;
+      }
+
       $entity->set($name, $value);
     }
 
@@ -767,6 +772,46 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
 
     $entity->save();
     return $entity;
+  }
+
+  /**
+   * Convert the pivot's table shape into a tablefield storage value.
+   *
+   * The migration pivot emits `{rows, hasHeader?, caption?}`, where `rows` is
+   * a list of rows, each a list of plain-text cells. The tablefield module
+   * stores a 2D `value` map (row index → cell list) plus an optional caption;
+   * its FieldType::setValue derives the rebuild rows/cols count from `value`.
+   * tablefield has no header flag of its own — the default formatter renders
+   * the first row as the header — so `hasHeader` is advisory and the header
+   * row, when present, simply stays as row 0 of the data.
+   */
+  protected function buildTablefieldValue(mixed $value, string $name, string $bundle): array {
+    if (!is_array($value)) {
+      throw new \InvalidArgumentException("Field '{$name}' on paragraph:{$bundle} expects a table object.");
+    }
+    $rows_in = $value['rows'] ?? [];
+    if (!is_array($rows_in)) {
+      throw new \InvalidArgumentException("Field '{$name}' on paragraph:{$bundle} expects 'rows' to be a list of rows.");
+    }
+
+    $rows = [];
+    foreach ($rows_in as $row) {
+      if (!is_array($row)) {
+        throw new \InvalidArgumentException("Field '{$name}' on paragraph:{$bundle} expects each table row to be a list of cells.");
+      }
+      $cells = [];
+      foreach ($row as $cell) {
+        $cells[] = is_scalar($cell) ? (string) $cell : '';
+      }
+      $rows[] = array_values($cells);
+    }
+
+    $table = ['value' => array_values($rows)];
+    $caption = trim((string) ($value['caption'] ?? ''));
+    if ($caption !== '') {
+      $table['caption'] = $caption;
+    }
+    return $table;
   }
 
   /**
