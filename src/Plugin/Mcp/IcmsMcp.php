@@ -634,12 +634,12 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       $old_ref_ids = [];
     }
 
-    $this->applyNodeAttributes($node, $node_attrs);
+    $media_count = 0;
+    $this->applyNodeAttributes($node, $node_attrs, $media_count);
     $node->set($this->sourceKeyFieldName(), $idempotence_key);
 
     $created_paragraphs = [];
     $child_paragraph_count = 0;
-    $media_count = 0;
     if ($paragraphs && $paragraph_storage !== NULL) {
       $sorted = $this->sortParagraphsBySequence($paragraphs);
       foreach ($sorted as $para) {
@@ -741,25 +741,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         continue;
       }
 
-      if ($field_type === 'entity_reference' && $target_type === 'media') {
-        $references = [];
-        foreach ($this->normalizeList($value) as $media_spec) {
-          $target_id = $this->resolveMediaReference($media_spec, $definition);
-          if ($target_id !== NULL) {
-            $references[] = ['target_id' => $target_id];
-            $media_count++;
-          }
-        }
-        $entity->set($name, $references);
-        continue;
-      }
-
-      if ($field_type === 'tablefield') {
-        $entity->set($name, $this->buildTablefieldValue($value, $name, $bundle));
-        continue;
-      }
-
-      $entity->set($name, $value);
+      $this->setEntityField($entity, $name, $value, $media_count);
     }
 
     $options = $spec['options'] ?? [];
@@ -772,6 +754,57 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
 
     $entity->save();
     return $entity;
+  }
+
+  /**
+   * Apply one non-paragraph field value, resolving reference field types.
+   *
+   * Shared by paragraph fields and node attributes so both resolve media and
+   * taxonomy references and tablefield payloads identically; anything else is
+   * set verbatim. Paragraph child references are NOT handled here — they need
+   * recursive materialization and stay in createParagraphFromSpec.
+   */
+  protected function setEntityField(
+    \Drupal\Core\Entity\FieldableEntityInterface $entity,
+    string $name,
+    mixed $value,
+    int &$media_count,
+  ): void {
+    $definition = $entity->getFieldDefinition($name);
+    $field_type = $definition->getType();
+    $target_type = (string) ($definition->getSetting('target_type') ?? '');
+
+    if ($field_type === 'entity_reference' && $target_type === 'media') {
+      $references = [];
+      foreach ($this->normalizeList($value) as $media_spec) {
+        $target_id = $this->resolveMediaReference($media_spec, $definition);
+        if ($target_id !== NULL) {
+          $references[] = ['target_id' => $target_id];
+          $media_count++;
+        }
+      }
+      $entity->set($name, $references);
+      return;
+    }
+
+    if ($field_type === 'entity_reference' && $target_type === 'taxonomy_term') {
+      $references = [];
+      foreach ($this->normalizeList($value) as $term_spec) {
+        $target_id = $this->resolveTaxonomyReference($term_spec, $definition);
+        if ($target_id !== NULL) {
+          $references[] = ['target_id' => $target_id];
+        }
+      }
+      $entity->set($name, $references);
+      return;
+    }
+
+    if ($field_type === 'tablefield') {
+      $entity->set($name, $this->buildTablefieldValue($value, $name, (string) $entity->bundle()));
+      return;
+    }
+
+    $entity->set($name, $value);
   }
 
   /**
@@ -912,6 +945,55 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     $media->set($source_field, $field_value);
     $this->validateAndSaveMedia($media);
     return (int) $media->id();
+  }
+
+  /**
+   * Resolve a taxonomy term reference by id or name, creating it if needed.
+   *
+   * Accepts an existing term id (int / numeric string / `{target_id}`) or a
+   * term name (plain string or `{name|title}`). A name is matched within the
+   * field's allowed vocabularies; an unmatched name is created in the first
+   * allowed vocabulary, mirroring how remote media is created on import so a
+   * migrated node keeps its topics even when the term is new.
+   */
+  protected function resolveTaxonomyReference(mixed $value, FieldDefinitionInterface $definition): ?int {
+    if (is_int($value) || (is_string($value) && ctype_digit($value))) {
+      return (int) $value;
+    }
+
+    $name = '';
+    if (is_array($value)) {
+      if (!empty($value['target_id'])) {
+        return (int) $value['target_id'];
+      }
+      $name = trim((string) ($value['name'] ?? $value['title'] ?? ''));
+    }
+    elseif (is_string($value)) {
+      $name = trim($value);
+    }
+    if ($name === '') {
+      return NULL;
+    }
+
+    $settings = $definition->getSetting('handler_settings') ?? [];
+    $vocabularies = array_keys($settings['target_bundles'] ?? []);
+    $storage = $this->entityTypeManager->getStorage('taxonomy_term');
+
+    $query = $storage->getQuery()->accessCheck(FALSE)->condition('name', $name)->range(0, 1);
+    if ($vocabularies) {
+      $query->condition('vid', $vocabularies, 'IN');
+    }
+    $ids = $query->execute();
+    if ($ids) {
+      return (int) reset($ids);
+    }
+
+    if (!$vocabularies) {
+      throw new \RuntimeException("Cannot create taxonomy term '{$name}': the field defines no target vocabulary.");
+    }
+    $term = $storage->create(['vid' => reset($vocabularies), 'name' => $name]);
+    $term->save();
+    return (int) $term->id();
   }
 
   /**
@@ -1102,7 +1184,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
    * canonical structured shape; everything else is set verbatim if the field
    * exists, ignored otherwise (validation already flagged unknowns).
    */
-  protected function applyNodeAttributes(\Drupal\node\NodeInterface $node, array $attrs): void {
+  protected function applyNodeAttributes(\Drupal\node\NodeInterface $node, array $attrs, int &$media_count): void {
     if (isset($attrs['title'])) {
       $node->setTitle((string) $attrs['title']);
     }
@@ -1126,7 +1208,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         continue;
       }
       if ($node->hasField($name)) {
-        $node->set($name, $value);
+        $this->setEntityField($node, $name, $value, $media_count);
       }
     }
   }
