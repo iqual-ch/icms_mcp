@@ -1065,6 +1065,13 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     $file = $existing ? reset($existing) : NULL;
     if ($file !== NULL && file_exists($uri) && filesize($uri) > 0) {
       /** @var \Drupal\file\FileInterface $file */
+      // When previously imported media was deleted, its orphaned file entity
+      // is demoted to temporary and "cannot be referenced" by new media.
+      // Reuse must re-promote it or the import fails on a stale entity.
+      if (!$file->isPermanent()) {
+        $file->setPermanent();
+        $file->save();
+      }
       return $file;
     }
 
@@ -1085,6 +1092,10 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
 
     // Reuse an existing managed file entity whose physical file was missing.
     if ($file !== NULL) {
+      if (!$file->isPermanent()) {
+        $file->setPermanent();
+        $file->save();
+      }
       return $file;
     }
 
