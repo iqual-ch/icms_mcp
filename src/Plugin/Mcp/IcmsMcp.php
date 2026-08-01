@@ -148,6 +148,46 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         ],
       ),
       new Tool(
+        name: 'import_taxonomy_terms',
+        description: 'Upsert one vocabulary of taxonomy terms (idempotent by source uuid, then by name). Preserves hierarchy, weights, and per-language labels. Returns per-term {tid, action}.',
+        inputSchema: [
+          'type' => 'object',
+          'properties' => [
+            'vocabulary' => [
+              'type' => 'string',
+              'description' => 'Target vocabulary machine name (must exist).',
+            ],
+            'terms' => [
+              'type' => 'array',
+              'description' => 'Terms: {uuid?, name, labels?, description?, parent (source tid or 0), tid (source id), weight?}.',
+            ],
+          ],
+          'required' => ['vocabulary', 'terms'],
+        ],
+      ),
+      new Tool(
+        name: 'import_menu_links',
+        description: 'Upsert menu links into an existing menu (idempotent by source uuid). Node links are resolved through the migration source-key (source URL -> imported node); unresolvable links are reported, not guessed. Returns per-link {action, target}.',
+        inputSchema: [
+          'type' => 'object',
+          'properties' => [
+            'menu' => [
+              'type' => 'string',
+              'description' => 'Target menu machine name (must exist).',
+            ],
+            'links' => [
+              'type' => 'array',
+              'description' => 'Links: {uuid, title, titles?, uri (source uri), parent (source uuid or empty), weight?, enabled?}.',
+            ],
+            'source_base_url' => [
+              'type' => 'string',
+              'description' => 'Source site base URL, used to resolve internal link targets against imported nodes.',
+            ],
+          ],
+          'required' => ['menu', 'links'],
+        ],
+      ),
+      new Tool(
         name: 'lookup_existing_node',
         description: 'Idempotency check: return {nid, content_hash, idempotence_key, changed} of the most recent node previously imported from this source URL, or null.',
         inputSchema: [
@@ -184,6 +224,19 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
           $result['pivot_log_uri'] = $log_uri;
         }
         return $this->jsonResponse($result);
+      }
+      if ($toolId === 'import_taxonomy_terms' || $toolId === md5('import_taxonomy_terms')) {
+        return $this->jsonResponse($this->doImportTaxonomyTerms(
+          (string) ($arguments['vocabulary'] ?? ''),
+          is_array($arguments['terms'] ?? NULL) ? $arguments['terms'] : [],
+        ));
+      }
+      if ($toolId === 'import_menu_links' || $toolId === md5('import_menu_links')) {
+        return $this->jsonResponse($this->doImportMenuLinks(
+          (string) ($arguments['menu'] ?? ''),
+          is_array($arguments['links'] ?? NULL) ? $arguments['links'] : [],
+          (string) ($arguments['source_base_url'] ?? ''),
+        ));
       }
       if ($toolId === 'import_pivot' || $toolId === md5('import_pivot')) {
         $pivot = $arguments['pivot'] ?? [];
@@ -685,6 +738,225 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       'paragraph_count' => count($created_paragraphs),
       'child_paragraph_count' => $child_paragraph_count,
       'media_count' => $media_count,
+    ];
+  }
+
+  /**
+   * Upsert taxonomy terms for one vocabulary, preserving hierarchy.
+   */
+  protected function doImportTaxonomyTerms(string $vocabulary, array $terms): array {
+    if ($vocabulary === '' || !$this->entityTypeManager->hasDefinition('taxonomy_term')) {
+      return ['status' => 'error', 'reason' => 'vocabulary is required and taxonomy must be installed.'];
+    }
+    $vocabulary_storage = $this->entityTypeManager->getStorage('taxonomy_vocabulary');
+    if ($vocabulary_storage->load($vocabulary) === NULL) {
+      return [
+        'status' => 'error',
+        'reason' => "Vocabulary '{$vocabulary}' does not exist on this site; create it first (target setup).",
+      ];
+    }
+    $term_storage = $this->entityTypeManager->getStorage('taxonomy_term');
+
+    $results = [];
+    $source_to_target = [];
+    foreach ($terms as $spec) {
+      if (!is_array($spec) || trim((string) ($spec['name'] ?? '')) === '') {
+        continue;
+      }
+      $name = trim((string) $spec['name']);
+      $uuid = (string) ($spec['uuid'] ?? '');
+      $existing = NULL;
+      if ($uuid !== '') {
+        $matches = $term_storage->loadByProperties(['uuid' => $uuid]);
+        $existing = $matches ? reset($matches) : NULL;
+      }
+      if ($existing === NULL) {
+        $matches = $term_storage->loadByProperties(['vid' => $vocabulary, 'name' => $name]);
+        $existing = $matches ? reset($matches) : NULL;
+      }
+
+      $parent_source = (int) ($spec['parent'] ?? 0);
+      $parent_target = $parent_source > 0 ? ($source_to_target[$parent_source] ?? 0) : 0;
+
+      if ($existing === NULL) {
+        $values = [
+          'vid' => $vocabulary,
+          'name' => $name,
+          'weight' => (int) ($spec['weight'] ?? 0),
+          'parent' => $parent_target,
+        ];
+        if ($uuid !== '') {
+          $values['uuid'] = $uuid;
+        }
+        if (!empty($spec['description'])) {
+          $values['description'] = ['value' => (string) $spec['description'], 'format' => 'basic_html'];
+        }
+        $term = $term_storage->create($values);
+        $action = 'created';
+      }
+      else {
+        $term = $existing;
+        $term->set('name', $name);
+        $term->set('weight', (int) ($spec['weight'] ?? $term->getWeight()));
+        $term->set('parent', $parent_target);
+        $action = 'updated';
+      }
+
+      $labels = is_array($spec['labels'] ?? NULL) ? $spec['labels'] : [];
+      foreach ($labels as $langcode => $label) {
+        if ($langcode === $term->language()->getId() || trim((string) $label) === '') {
+          continue;
+        }
+        try {
+          $translation = $term->hasTranslation($langcode)
+            ? $term->getTranslation($langcode)
+            : $term->addTranslation($langcode, []);
+          $translation->set('name', trim((string) $label));
+        }
+        catch (\InvalidArgumentException $e) {
+          // Language not enabled — skip silently, the term itself imports.
+        }
+      }
+      $term->save();
+      $source_to_target[(int) ($spec['tid'] ?? 0)] = (int) $term->id();
+      $results[] = ['name' => $name, 'tid' => (int) $term->id(), 'action' => $action];
+    }
+
+    return [
+      'status' => 'ok',
+      'vocabulary' => $vocabulary,
+      'term_count' => count($results),
+      'terms' => $results,
+    ];
+  }
+
+  /**
+   * Upsert menu links, resolving node targets through the source key.
+   */
+  protected function doImportMenuLinks(string $menu, array $links, string $source_base_url): array {
+    if ($menu === '' || !$this->entityTypeManager->hasDefinition('menu_link_content')) {
+      return ['status' => 'error', 'reason' => 'menu is required and menu_link_content must be installed.'];
+    }
+    if ($this->entityTypeManager->getStorage('menu')->load($menu) === NULL) {
+      return [
+        'status' => 'error',
+        'reason' => "Menu '{$menu}' does not exist on this site; create it first (target setup).",
+      ];
+    }
+    $link_storage = $this->entityTypeManager->getStorage('menu_link_content');
+    $source_field = $this->sourceKeyFieldName();
+
+    $results = [];
+    $uuid_to_plugin = [];
+    foreach ($links as $spec) {
+      if (!is_array($spec) || trim((string) ($spec['title'] ?? '')) === '') {
+        continue;
+      }
+      $title = trim((string) $spec['title']);
+      $uuid = (string) ($spec['uuid'] ?? '');
+      $source_uri = (string) ($spec['uri'] ?? '');
+
+      // Resolve the target: internal node links go through the migration
+      // source key so they point at the IMPORTED node.
+      $resolved_uri = '';
+      $unresolved_reason = '';
+      if (preg_match('#^(?:entity:node/|internal:/node/)(\\d+)$#', $source_uri, $m)) {
+        $source_url = rtrim($source_base_url, '/') . '/node/' . $m[1];
+        $nid = $this->findNodeBySourceUrl(NULL, $source_field, $source_url);
+        if ($nid !== NULL) {
+          $resolved_uri = 'entity:node/' . $nid;
+        }
+        else {
+          $unresolved_reason = "No imported node found for source {$source_url}.";
+        }
+      }
+      elseif (str_starts_with($source_uri, 'internal:') || str_starts_with($source_uri, 'route:')) {
+        $resolved_uri = $source_uri;
+      }
+      elseif (str_starts_with($source_uri, 'http://') || str_starts_with($source_uri, 'https://')) {
+        $resolved_uri = $source_uri;
+      }
+      elseif ($source_uri !== '') {
+        $resolved_uri = 'internal:' . (str_starts_with($source_uri, '/') ? $source_uri : '/' . $source_uri);
+      }
+
+      if ($resolved_uri === '') {
+        $results[] = [
+          'title' => $title,
+          'status' => 'unresolved',
+          'reason' => $unresolved_reason ?: 'No usable link target.',
+        ];
+        continue;
+      }
+
+      $existing = NULL;
+      if ($uuid !== '') {
+        $matches = $link_storage->loadByProperties(['uuid' => $uuid]);
+        $existing = $matches ? reset($matches) : NULL;
+      }
+      $parent_uuid = (string) ($spec['parent'] ?? '');
+      $parent_plugin = '';
+      if ($parent_uuid !== '') {
+        // Source parents arrive as "menu_link_content:<uuid>" plugin ids.
+        $parent_uuid_clean = str_replace('menu_link_content:', '', $parent_uuid);
+        $parent_plugin = $uuid_to_plugin[$parent_uuid_clean] ?? '';
+      }
+
+      if ($existing === NULL) {
+        $values = [
+          'menu_name' => $menu,
+          'title' => $title,
+          'link' => ['uri' => $resolved_uri],
+          'weight' => (int) ($spec['weight'] ?? 0),
+          'enabled' => (bool) ($spec['enabled'] ?? TRUE),
+          'expanded' => (bool) ($spec['expanded'] ?? FALSE),
+        ];
+        if ($uuid !== '') {
+          $values['uuid'] = $uuid;
+        }
+        if ($parent_plugin !== '') {
+          $values['parent'] = $parent_plugin;
+        }
+        $link = $link_storage->create($values);
+        $action = 'created';
+      }
+      else {
+        $link = $existing;
+        $link->set('title', $title);
+        $link->set('link', ['uri' => $resolved_uri]);
+        $link->set('weight', (int) ($spec['weight'] ?? $link->getWeight()));
+        if ($parent_plugin !== '') {
+          $link->set('parent', $parent_plugin);
+        }
+        $action = 'updated';
+      }
+
+      $titles = is_array($spec['titles'] ?? NULL) ? $spec['titles'] : [];
+      foreach ($titles as $langcode => $label) {
+        if ($langcode === $link->language()->getId() || trim((string) $label) === '') {
+          continue;
+        }
+        try {
+          $translation = $link->hasTranslation($langcode)
+            ? $link->getTranslation($langcode)
+            : $link->addTranslation($langcode, []);
+          $translation->set('title', trim((string) $label));
+        }
+        catch (\InvalidArgumentException $e) {
+          // Language not enabled — skip.
+        }
+      }
+      $link->save();
+      $uuid_to_plugin[$link->uuid()] = 'menu_link_content:' . $link->uuid();
+      $results[] = ['title' => $title, 'status' => 'ok', 'action' => $action, 'uri' => $resolved_uri];
+    }
+
+    return [
+      'status' => 'ok',
+      'menu' => $menu,
+      'link_count' => count($results),
+      'unresolved_count' => count(array_filter($results, static fn (array $row) => ($row['status'] ?? '') === 'unresolved')),
+      'links' => $results,
     ];
   }
 
@@ -1437,14 +1709,17 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
    * field. Matches by `source_url + "#"` prefix so any prior import of the
    * same page (regardless of content_hash) is found.
    */
-  protected function findNodeBySourceUrl(string $bundle, string $field, string $source_url): ?int {
+  protected function findNodeBySourceUrl(?string $bundle, string $field, string $source_url): ?int {
     if ($source_url === '') {
       return NULL;
     }
     try {
-      $nids = $this->entityTypeManager->getStorage('node')->getQuery()
-        ->accessCheck(FALSE)
-        ->condition('type', $bundle)
+      $query = $this->entityTypeManager->getStorage('node')->getQuery()
+        ->accessCheck(FALSE);
+      if ($bundle !== NULL && $bundle !== '') {
+        $query->condition('type', $bundle);
+      }
+      $nids = $query
         ->condition($field, $source_url . '#', 'STARTS_WITH')
         ->sort('changed', 'DESC')
         ->range(0, 1)
