@@ -562,6 +562,10 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         $idempotence_key,
         $existing_nid,
       );
+      $translations_spec = is_array($import['translations'] ?? NULL) ? $import['translations'] : [];
+      if ($translations_spec) {
+        $result['translations'] = $this->writeTranslations((int) $result['nid'], $translations_spec);
+      }
       $result['idempotence_key'] = $idempotence_key;
       $result['strategy'] = $strategy;
       $result['action'] = $existing_nid === NULL ? 'created' : 'updated';
@@ -682,6 +686,142 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       'child_paragraph_count' => $child_paragraph_count,
       'media_count' => $media_count,
     ];
+  }
+
+  /**
+   * Create/update node translations, each with its own paragraph set.
+   *
+   * PageDesigner sources are asymmetric: the per-language composition trees
+   * can differ, so when the layouts field is translatable every translation
+   * receives its own paragraph entities. When the field is not translatable
+   * the translation gets its scalar fields only and the summary says so —
+   * shared paragraphs are never silently replaced per language.
+   *
+   * @param int $nid
+   *   The saved default-language node ID.
+   * @param array $translations
+   *   Translation specs ({langcode, node.attributes, paragraphs}).
+   *
+   * @return array
+   *   One summary entry per requested translation.
+   */
+  protected function writeTranslations(int $nid, array $translations): array {
+    $node_storage = $this->entityTypeManager->getStorage('node');
+    $node_storage->resetCache([$nid]);
+    /** @var \Drupal\node\NodeInterface $node */
+    $node = $node_storage->load($nid);
+    if ($node === NULL) {
+      throw new \RuntimeException("Node {$nid} disappeared before translation write.");
+    }
+    $paragraph_storage = $this->entityTypeManager->hasDefinition('paragraph')
+      ? $this->entityTypeManager->getStorage('paragraph')
+      : NULL;
+    $layouts_field = $this->layoutsFieldName();
+
+    $summary = [];
+    foreach ($translations as $translation_spec) {
+      if (!is_array($translation_spec)) {
+        continue;
+      }
+      $langcode = (string) ($translation_spec['langcode'] ?? '');
+      if ($langcode === '' || $langcode === $node->language()->getId()) {
+        continue;
+      }
+
+      $exists = $node->hasTranslation($langcode);
+      try {
+        $translation = $exists
+          ? $node->getTranslation($langcode)
+          : $node->addTranslation($langcode, []);
+      }
+      catch (\InvalidArgumentException $e) {
+        $summary[] = [
+          'langcode' => $langcode,
+          'status' => 'skipped',
+          'reason' => 'Language is not enabled on the target site.',
+        ];
+        continue;
+      }
+
+      $attrs = is_array($translation_spec['node']['attributes'] ?? NULL)
+        ? $translation_spec['node']['attributes']
+        : [];
+      unset($attrs['langcode']);
+      $media_count = 0;
+      $this->applyNodeAttributes($translation, $attrs, $media_count);
+
+      $paragraph_specs = is_array($translation_spec['paragraphs'] ?? NULL)
+        ? $translation_spec['paragraphs']
+        : [];
+      $paragraphs_translated = FALSE;
+      $old_ref_ids = [];
+      $field_definition = $translation->hasField($layouts_field)
+        ? $translation->getFieldDefinition($layouts_field)
+        : NULL;
+
+      if ($paragraph_specs && $paragraph_storage !== NULL && $field_definition !== NULL && $field_definition->isTranslatable()) {
+        foreach ($translation->get($layouts_field) as $item) {
+          $target_id = (int) ($item->target_id ?? 0);
+          if ($target_id > 0) {
+            $old_ref_ids[$target_id] = $target_id;
+          }
+        }
+        $created = [];
+        $child_paragraph_count = 0;
+        foreach ($this->sortParagraphsBySequence($paragraph_specs) as $para) {
+          $entity = $this->createParagraphFromSpec(
+            [
+              'type' => $para['type'] ?? '',
+              'fields' => $para['attributes'] ?? [],
+              'options' => $para['options'] ?? [],
+            ],
+            $paragraph_storage,
+            $child_paragraph_count,
+            $media_count,
+          );
+          if ($entity->hasField('langcode')) {
+            $entity->set('langcode', $langcode);
+            $entity->save();
+          }
+          $created[] = [
+            'target_id' => $entity->id(),
+            'target_revision_id' => $entity->getRevisionId(),
+          ];
+        }
+        $translation->set($layouts_field, $created);
+        $paragraphs_translated = TRUE;
+      }
+
+      $translation->save();
+
+      // Best-effort cleanup of this language's previous paragraph set,
+      // after the translation save committed the new references.
+      if ($old_ref_ids && $paragraph_storage !== NULL) {
+        foreach ($paragraph_storage->loadMultiple(array_values($old_ref_ids)) as $old) {
+          try {
+            $old->delete();
+          }
+          catch (\Throwable $e) {
+            // Best effort.
+          }
+        }
+      }
+
+      $entry = [
+        'langcode' => $langcode,
+        'status' => 'ok',
+        'action' => $exists ? 'updated' : 'created',
+        'paragraph_count' => count($paragraph_specs),
+        'paragraphs_translated' => $paragraphs_translated,
+        'media_count' => $media_count,
+      ];
+      if ($paragraph_specs && !$paragraphs_translated) {
+        $entry['reason'] = "Field {$layouts_field} is not translatable; scalar fields were translated, paragraphs stay shared.";
+      }
+      $summary[] = $entry;
+    }
+
+    return $summary;
   }
 
   /**
