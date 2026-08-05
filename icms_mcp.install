@@ -2,7 +2,8 @@
 
 /**
  * @file
- * Install/update hooks: source-key field coverage on all node bundles.
+ * Install/update hooks: source-key field coverage on all node bundles and
+ * the MCP service account (role + user) the agent authenticates as.
  */
 
 declare(strict_types=1);
@@ -12,6 +13,23 @@ declare(strict_types=1);
  */
 function icms_mcp_install(): void {
   icms_mcp_ensure_source_key_field();
+  $password = icms_mcp_ensure_service_account();
+  if ($password !== NULL) {
+    \Drupal::messenger()->addStatus(t(
+      'Created MCP service user %name with password %password — shown only this once; rotate with `drush upwd %name`. Export config (drush cex) so the icms_mcp role survives the next config import.',
+      ['%name' => ICMS_MCP_SERVICE_ACCOUNT, '%password' => $password],
+    ));
+  }
+}
+
+/**
+ * Implements hook_uninstall().
+ *
+ * The module is enabled per site only during its migration window; removing
+ * it must leave no standing credential behind.
+ */
+function icms_mcp_uninstall(): void {
+  icms_mcp_remove_service_account();
 }
 
 /**
@@ -22,4 +40,15 @@ function icms_mcp_update_10101(): string {
   return $created
     ? 'Created the source-key field on: ' . implode(', ', $created) . '. Export config (drush cex) so the next config import keeps it.'
     : 'Source-key field already present on every node bundle.';
+}
+
+/**
+ * Create the MCP service role + user on already-installed sites.
+ */
+function icms_mcp_update_10102(): string {
+  $password = icms_mcp_ensure_service_account();
+  if ($password !== NULL) {
+    return 'Created MCP service user ' . ICMS_MCP_SERVICE_ACCOUNT . " with password {$password} — shown only this once; rotate with drush upwd. Export config (drush cex) so the role survives the next config import.";
+  }
+  return 'MCP service role ensured; the ' . ICMS_MCP_SERVICE_ACCOUNT . ' user already existed (password untouched).';
 }

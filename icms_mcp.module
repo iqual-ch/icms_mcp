@@ -2,7 +2,8 @@
 
 /**
  * @file
- * Keeps the source-key field present on every node bundle.
+ * Keeps the source-key field present on every node bundle, and owns the
+ * MCP service account (role + user) the agent authenticates as.
  */
 
 declare(strict_types=1);
@@ -10,6 +11,13 @@ declare(strict_types=1);
 use Drupal\field\Entity\FieldConfig;
 use Drupal\field\Entity\FieldStorageConfig;
 use Drupal\node\NodeTypeInterface;
+use Drupal\user\Entity\Role;
+use Drupal\user\Entity\User;
+
+/**
+ * Machine name of the service role and user this module owns.
+ */
+const ICMS_MCP_SERVICE_ACCOUNT = 'icms_mcp';
 
 /**
  * Ensure the configured source-key field exists on node bundles.
@@ -81,4 +89,68 @@ function icms_mcp_node_type_insert(NodeTypeInterface $node_type): void {
     return;
   }
   icms_mcp_ensure_source_key_field($node_type->id());
+}
+
+/**
+ * Ensure the MCP service role and user exist with exactly the MCP grants.
+ *
+ * The agent authenticates as a dedicated user carrying only `use mcp server`
+ * (drupal/mcp) and `use icms_mcp tools` (this module) — the module owns that
+ * account's lifecycle so per-site setup is just enabling the module during
+ * the migration window. The role is a config entity: run `drush cex` after
+ * install or the next config import deletes it (the user survives — users
+ * are content — but loses its grants with the role).
+ *
+ * @return string|null
+ *   The generated password when the user was newly created (shown exactly
+ *   once — rotate any time with `drush upwd icms_mcp`), NULL otherwise.
+ */
+function icms_mcp_ensure_service_account(): ?string {
+  $role = Role::load(ICMS_MCP_SERVICE_ACCOUNT);
+  if ($role === NULL) {
+    $role = Role::create([
+      'id' => ICMS_MCP_SERVICE_ACCOUNT,
+      'label' => 'ICMS MCP',
+    ]);
+  }
+  foreach (['use mcp server', 'use icms_mcp tools'] as $permission) {
+    $role->grantPermission($permission);
+  }
+  $role->save();
+
+  $existing = \Drupal::entityTypeManager()->getStorage('user')
+    ->loadByProperties(['name' => ICMS_MCP_SERVICE_ACCOUNT]);
+  if ($existing) {
+    /** @var \Drupal\user\UserInterface $user */
+    $user = reset($existing);
+    if (!$user->hasRole(ICMS_MCP_SERVICE_ACCOUNT)) {
+      $user->addRole(ICMS_MCP_SERVICE_ACCOUNT);
+      $user->save();
+    }
+    return NULL;
+  }
+
+  $password = \Drupal::service('password_generator')->generate(24);
+  User::create([
+    'name' => ICMS_MCP_SERVICE_ACCOUNT,
+    'status' => 1,
+    'roles' => [ICMS_MCP_SERVICE_ACCOUNT],
+    'pass' => $password,
+  ])->save();
+  \Drupal::logger('icms_mcp')->notice('Created the @name service user and role. Export config (drush cex) so the next config import keeps the role.', [
+    '@name' => ICMS_MCP_SERVICE_ACCOUNT,
+  ]);
+  return $password;
+}
+
+/**
+ * Remove the MCP service user and role this module created.
+ */
+function icms_mcp_remove_service_account(): void {
+  $users = \Drupal::entityTypeManager()->getStorage('user')
+    ->loadByProperties(['name' => ICMS_MCP_SERVICE_ACCOUNT]);
+  foreach ($users as $user) {
+    $user->delete();
+  }
+  Role::load(ICMS_MCP_SERVICE_ACCOUNT)?->delete();
 }

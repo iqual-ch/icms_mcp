@@ -106,9 +106,15 @@ ddev drush en icms_mcp -y
 
 1. `/admin/config/mcp` — enable token auth and the `icms-mcp` plugin
    (hyphen, not underscore — see "Plugin ID gotcha" above).
-2. Create a dedicated Drupal user for the agent. Grant **only** the
-   `Use MCP server` permission (from drupal/mcp) and the
-   `Use ICMS MCP tools` permission (from this module). No other roles.
+2. The service account is created for you: install adds an `icms_mcp` role
+   (only `Use MCP server` + `Use ICMS MCP tools`, nothing else) and an
+   active `icms_mcp` user with a generated password **printed exactly once**
+   in the install/updb output. Rotate it any time with
+   `ddev drush upwd icms_mcp '<new password>'`. Uninstall deletes both —
+   no standing credential outside the migration window.
+3. The role is a config entity: run `ddev drush cex` after install, or the
+   next config import deletes it (the user would survive but lose its
+   grants).
 
 ## Why a plugin and not a custom REST/JSON:API endpoint?
 
