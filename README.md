@@ -11,7 +11,7 @@ Seven tools. On the wire the names become `icms-mcp_<sanitized-tool-name>`
 
 | Tool (wire name)                  | Purpose                                                                                  |
 | --------------------------------- | ---------------------------------------------------------------------------------------- |
-| `icms-mcp_get_icms_catalog`       | Compact normalized v2 manifest with hash, indexes, capabilities, descriptions, fields and options. |
+| `icms-mcp_get_icms_catalog`       | Compact normalized v2 manifest with hash, indexes, capabilities, descriptions, fields, options and existing taxonomy vocabularies. |
 | `icms-mcp_get_icms_component_contract` | Full contracts for selected node, paragraph or media bundles, optionally including paragraph children. |
 | `icms-mcp_validate_pivot`         | Drupal-side validation of an `icms-drupal-import-handoff-v1` pivot.                       |
 | `icms-mcp_import_pivot`           | Transactional create/update of node + paragraphs + translations. Honours `strategy` and HITL gate. |

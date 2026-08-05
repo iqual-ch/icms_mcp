@@ -85,10 +85,22 @@ final class IcmsCatalogBuilder {
     ksort($allowedByNodeType);
     $allowed = $allowedByNodeType['icms_page'] ?? [];
 
+    // Existing taxonomy vocabularies: the migration tool's vocabulary-mapping
+    // HITL offers these as "map to" targets. Creating vocabularies is target
+    // setup (config-in-git via the dev skill), never an MCP write.
+    $vocabularies = [];
+    if ($this->entityTypeManager->hasDefinition('taxonomy_vocabulary')) {
+      foreach ($this->entityTypeManager->getStorage('taxonomy_vocabulary')->loadMultiple() as $vocabulary) {
+        $vocabularies[(string) $vocabulary->id()] = (string) $vocabulary->label();
+      }
+      ksort($vocabularies);
+    }
+
     $manifest = [
       'status' => 'ok',
       'format' => 'icms-target-catalog-v2',
       'site' => ['sourceKeyField' => $sourceField, 'layoutsField' => $layoutsField],
+      'vocabularies' => $vocabularies,
       'fieldDefinitions' => $fieldDefinitions,
       'optionDefinitions' => $options,
       'nodeTypes' => $indexes['nodeTypes'],
