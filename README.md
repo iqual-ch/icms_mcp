@@ -114,17 +114,26 @@ ddev drush en icms_mcp -y
 
 ## Configure
 
-1. `/admin/config/mcp` — enable token auth and the `icms-mcp` plugin
-   (hyphen, not underscore — see "Plugin ID gotcha" above).
+1. The MCP endpoint is configured for you: install (and `drush updb`,
+   update 10103) turns endpoint authentication ON with basic auth allowed
+   (the service account's scheme; token settings are preserved), enables
+   the `icms-mcp` plugin (hyphen, not underscore — see "Plugin ID gotcha"
+   above), and writes an explicit `enabled: false` for every other MCP
+   plugin the site hasn't deliberately configured. That last part matters
+   twice over: unconfigured plugins count as *enabled* in `drupal/mcp`,
+   which exposes DrushCaller (drush over HTTP to anyone with `use mcp
+   server`) and makes `tools/list` shell out to drush (~70s — past any MCP
+   client timeout). Plugins you configured explicitly are left alone. The
+   `basic_auth` core module is a dependency and is installed automatically.
 2. The service account is created for you: install adds an `icms_mcp` role
    (only `Use MCP server` + `Use ICMS MCP tools`, nothing else) and an
    active `icms_mcp` user with a generated password **printed exactly once**
    in the install/updb output. Rotate it any time with
    `ddev drush upwd icms_mcp '<new password>'`. Uninstall deletes both —
    no standing credential outside the migration window.
-3. The role is a config entity: run `ddev drush cex` after install, or the
-   next config import deletes it (the user would survive but lose its
-   grants).
+3. The role and `mcp.settings` are config: run `ddev drush cex` after
+   install, or the next config import deletes the role (the user would
+   survive but lose its grants) and reverts the endpoint hardening.
 
 ## Why a plugin and not a custom REST/JSON:API endpoint?
 

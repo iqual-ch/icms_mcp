@@ -2,8 +2,9 @@
 
 /**
  * @file
- * Install/update hooks: source-key field coverage on all node bundles and
- * the MCP service account (role + user) the agent authenticates as.
+ * Install/update hooks: source-key field coverage on all node bundles, the
+ * MCP service account (role + user) the agent authenticates as, and the
+ * hardened MCP endpoint configuration (auth on, icms-mcp plugin only).
  */
 
 declare(strict_types=1);
@@ -13,6 +14,7 @@ declare(strict_types=1);
  */
 function icms_mcp_install(): void {
   icms_mcp_ensure_source_key_field();
+  icms_mcp_configure_mcp_endpoint();
   $password = icms_mcp_ensure_service_account();
   if ($password !== NULL) {
     \Drupal::messenger()->addStatus(t(
@@ -30,6 +32,7 @@ function icms_mcp_install(): void {
  */
 function icms_mcp_uninstall(): void {
   icms_mcp_remove_service_account();
+  icms_mcp_release_mcp_endpoint();
 }
 
 /**
@@ -51,4 +54,16 @@ function icms_mcp_update_10102(): string {
     return 'Created MCP service user ' . ICMS_MCP_SERVICE_ACCOUNT . " with password {$password} — shown only this once; rotate with drush upwd. Export config (drush cex) so the role survives the next config import.";
   }
   return 'MCP service role ensured; the ' . ICMS_MCP_SERVICE_ACCOUNT . ' user already existed (password untouched).';
+}
+
+/**
+ * Harden the MCP endpoint: auth + basic auth on, icms-mcp only, no drush.
+ */
+function icms_mcp_update_10103(): string {
+  \Drupal::service('module_installer')->install(['basic_auth']);
+  $changes = icms_mcp_configure_mcp_endpoint();
+  $summary = $changes
+    ? 'MCP endpoint configured: ' . implode('; ', $changes) . '.'
+    : 'MCP endpoint already in the enforced state.';
+  return $summary . ' Export config (drush cex) so the next config import keeps it.';
 }

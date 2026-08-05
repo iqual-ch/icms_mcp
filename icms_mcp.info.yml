@@ -5,6 +5,7 @@ package: 'iqual'
 core_version_requirement: ^10 || ^11
 dependencies:
   - drupal:system
+  - drupal:basic_auth
   - drupal:node
   - drupal:paragraphs
   - paragraphs_blokkli:paragraphs_blokkli

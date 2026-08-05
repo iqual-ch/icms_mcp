@@ -144,6 +144,79 @@ function icms_mcp_ensure_service_account(): ?string {
 }
 
 /**
+ * Configure the MCP endpoint for service-account access to the ICMS tools.
+ *
+ * The bare drupal/mcp defaults are unusable for the migration agent and
+ * unsafe in general: authentication is off, and every plugin without an
+ * explicit config entry counts as ENABLED — including DrushCaller, which
+ * both shells out to drush on each tools/list (~70s, past any MCP client
+ * timeout) and hands drush execution to anyone holding `use mcp server`.
+ *
+ * This enforces: auth on with basic auth allowed (the service account's
+ * scheme; existing token settings are preserved), the icms-mcp plugin on,
+ * and an explicit `enabled: false` for every other discovered plugin that
+ * the site has not deliberately configured. Explicit site choices are kept,
+ * with `enabled` cast to a real boolean (`drush cset ... false` stores the
+ * truthy string "false").
+ *
+ * @return string[]
+ *   Human-readable descriptions of the changes applied (empty when the
+ *   configuration was already in the enforced state).
+ */
+function icms_mcp_configure_mcp_endpoint(): array {
+  $config = \Drupal::configFactory()->getEditable('mcp.settings');
+  $changes = [];
+
+  if ($config->get('enable_auth') !== TRUE) {
+    $config->set('enable_auth', TRUE);
+    $changes[] = 'enabled endpoint authentication';
+  }
+  if ($config->get('auth_settings.enable_basic_auth') !== TRUE) {
+    $config->set('auth_settings.enable_basic_auth', TRUE);
+    $changes[] = 'allowed basic auth (the service-account scheme)';
+  }
+
+  $plugins = $config->get('plugins') ?? [];
+  foreach (\Drupal::service('plugin.manager.mcp')->getDefinitions() as $plugin_id => $definition) {
+    $configured = array_key_exists($plugin_id, $plugins);
+    $enabled = $plugins[$plugin_id]['enabled'] ?? NULL;
+    if ($plugin_id === 'icms-mcp') {
+      if ($enabled !== TRUE) {
+        $plugins[$plugin_id]['enabled'] = TRUE;
+        $changes[] = 'enabled the icms-mcp plugin';
+      }
+      continue;
+    }
+    if (!$configured) {
+      $plugins[$plugin_id]['enabled'] = FALSE;
+      $changes[] = "disabled the unconfigured {$plugin_id} plugin";
+    }
+    elseif (!is_bool($enabled)) {
+      $plugins[$plugin_id]['enabled'] = $enabled === 'true' || $enabled === '1' || $enabled === 1;
+      $changes[] = "normalized the {$plugin_id} plugin's enabled flag to a boolean";
+    }
+  }
+  $config->set('plugins', $plugins);
+
+  if ($changes) {
+    $config->save();
+  }
+  return $changes;
+}
+
+/**
+ * Remove this module's plugin entry from the MCP endpoint configuration.
+ *
+ * Endpoint auth and the other plugins' explicit states are left alone —
+ * they are site-level hardening, not something only this module relies on.
+ */
+function icms_mcp_release_mcp_endpoint(): void {
+  \Drupal::configFactory()->getEditable('mcp.settings')
+    ->clear('plugins.icms-mcp')
+    ->save();
+}
+
+/**
  * Remove the MCP service user and role this module created.
  */
 function icms_mcp_remove_service_account(): void {
