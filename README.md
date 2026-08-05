@@ -73,11 +73,16 @@ Two field machine names are configurable via `state` (defaults shown):
 
 | State key                     | Default                  | Purpose                                                                   |
 | ----------------------------- | ------------------------ | ------------------------------------------------------------------------- |
-| `icms_mcp.source_key_field`   | `field_icms_source_key`  | Plain string field (max 512) on `icms_page` storing the agent's `idempotence_key`. |
+| `icms_mcp.source_key_field`   | `field_icms_source_key`  | Plain string field (max 512) on every migrated node bundle storing the agent's `idempotence_key`. |
 | `icms_mcp.layouts_field`      | `field_icms_paragraphs`  | `entity_reference_revisions` field on `icms_page` that holds layout paragraphs. |
 
-This module **does not auto-create those fields** — fields are part of your
-site configuration. If the defaults don't match your install:
+The **source-key field is owned by this module** — it is pure migration
+infrastructure, so install/update hooks create it on every node bundle,
+new bundles get it automatically, and `import_pivot` recreates it when a
+config import dropped it. After the module (or an update) first creates it
+on an environment, export config (`drush cex`) so the next config import
+keeps it. The **layouts field** stays your site's responsibility: it is part
+of the ICMS content model. If the defaults don't match your install:
 
 ```bash
 ddev drush state:set icms_mcp.source_key_field field_my_source_key

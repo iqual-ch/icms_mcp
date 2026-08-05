@@ -1,0 +1,84 @@
+<?php
+
+/**
+ * @file
+ * Keeps the source-key field present on every node bundle.
+ */
+
+declare(strict_types=1);
+
+use Drupal\field\Entity\FieldConfig;
+use Drupal\field\Entity\FieldStorageConfig;
+use Drupal\node\NodeTypeInterface;
+
+/**
+ * Ensure the configured source-key field exists on node bundles.
+ *
+ * The field is icms_mcp's own idempotency infrastructure — it stores the
+ * agent's `{source_url}#{content_hash}` key — so the module owns its
+ * lifecycle instead of requiring every ICMS project to add it by hand.
+ * Runtime-created config is deleted by the next config import unless the
+ * site exports it: run `drush cex` after this fires on an environment, or
+ * ship the field in the project template config.
+ *
+ * @param string|null $bundle
+ *   A single node bundle to cover, or NULL for all node bundles.
+ *
+ * @return string[]
+ *   The bundles a field instance was created on.
+ */
+function icms_mcp_ensure_source_key_field(?string $bundle = NULL): array {
+  $field_name = (string) \Drupal::state()->get('icms_mcp.source_key_field', 'field_icms_source_key');
+
+  $storage = FieldStorageConfig::loadByName('node', $field_name);
+  if (!$storage) {
+    $storage = FieldStorageConfig::create([
+      'field_name' => $field_name,
+      'entity_type' => 'node',
+      'type' => 'string',
+      'cardinality' => 1,
+      'settings' => ['max_length' => 512],
+    ]);
+    $storage->save();
+  }
+
+  $bundles = $bundle !== NULL
+    ? [$bundle]
+    : array_keys(\Drupal::service('entity_type.bundle.info')->getBundleInfo('node'));
+
+  $created = [];
+  foreach ($bundles as $node_bundle) {
+    if (FieldConfig::loadByName('node', $node_bundle, $field_name)) {
+      continue;
+    }
+    FieldConfig::create([
+      'field_storage' => $storage,
+      'bundle' => $node_bundle,
+      'label' => 'ICMS source idempotence key',
+      'required' => FALSE,
+      'translatable' => TRUE,
+    ])->save();
+    $created[] = $node_bundle;
+  }
+  if ($created) {
+    \Drupal::logger('icms_mcp')->notice('Created source-key field @field on bundle(s): @bundles. Export config (drush cex) so the next config import keeps it.', [
+      '@field' => $field_name,
+      '@bundles' => implode(', ', $created),
+    ]);
+  }
+  return $created;
+}
+
+/**
+ * Implements hook_ENTITY_TYPE_insert() for node_type.
+ *
+ * Bundles created after install still get the field (the update hook only
+ * runs once). Skipped during config sync: there the instance either arrives
+ * with the imported config, or import_pivot's self-heal recreates it.
+ */
+function icms_mcp_node_type_insert(NodeTypeInterface $node_type): void {
+  if ($node_type->isSyncing()) {
+    return;
+  }
+  icms_mcp_ensure_source_key_field($node_type->id());
+}

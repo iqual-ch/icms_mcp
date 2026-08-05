@@ -34,9 +34,12 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
  *
  * Configurable site state (`\Drupal::state()`):
  *   - icms_mcp.source_key_field: defaults to `field_icms_source_key`. Plain
- *     string field on `icms_page` storing the agent's `idempotence_key`
- *     ({source_url}#{content_hash}). Must exist on the site — this module
- *     does NOT create it (fields belong in configuration management).
+ *     string field storing the agent's `idempotence_key`
+ *     ({source_url}#{content_hash}). The module owns this field: install and
+ *     update hooks create it on every node bundle, new bundles get it via
+ *     hook_node_type_insert(), and import_pivot recreates it when missing
+ *     (see icms_mcp_ensure_source_key_field()). Export the created config so
+ *     the next config import keeps it.
  *   - icms_mcp.layouts_field: defaults to `field_icms_paragraphs`. Entity
  *     reference revisions field on `icms_page` that holds the layout
  *     paragraphs in order.
@@ -492,7 +495,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         $issues[] = [
           'path' => '/site',
           'code' => 'missing_source_key_field',
-          'message' => "Configured source-key field '{$source_field}' is not present on node:{$node_bundle}. Add a plain string field (max 512) and store its machine name in state('icms_mcp.source_key_field').",
+          'message' => "Configured source-key field '{$source_field}' is not present on node:{$node_bundle}. Run the icms_mcp database updates (drush updb) to create it everywhere, or add a plain string field (max 512) and store its machine name in state('icms_mcp.source_key_field').",
         ];
       }
     }
@@ -509,6 +512,18 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
    * Transactionally import a pivot document.
    */
   protected function doImportPivot(array $pivot, bool $dry_run, bool $approve): array {
+    // 0. Self-heal the source-key field before validating: it is this
+    //    module's own idempotency infrastructure, so a real import recreates
+    //    it (a config import may have dropped it, or the bundle may postdate
+    //    the update hook) instead of failing. Dry runs stay read-only.
+    $node_bundle = $this->stripJsonApiPrefix($pivot['drupal_import']['node']['type'] ?? '');
+    if (!$dry_run && $node_bundle !== '') {
+      $defs = $this->fieldManager->getFieldDefinitions('node', $node_bundle);
+      if (!isset($defs[$this->sourceKeyFieldName()])) {
+        icms_mcp_ensure_source_key_field($node_bundle);
+      }
+    }
+
     // 1. Always validate first — refuse to write a contract we already know
     //    is broken.
     $validation = $this->doValidatePivot($pivot);
@@ -522,7 +537,6 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
 
     $metadata = $pivot['metadata'] ?? [];
     $import = $pivot['drupal_import'] ?? [];
-    $node_bundle = $this->stripJsonApiPrefix($import['node']['type'] ?? '');
     $node_attrs = $import['node']['attributes'] ?? [];
     $paragraphs = $import['paragraphs'] ?? [];
     $idempotence_key = (string) ($metadata['idempotence_key'] ?? '');

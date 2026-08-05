@@ -1,0 +1,25 @@
+<?php
+
+/**
+ * @file
+ * Install/update hooks: source-key field coverage on all node bundles.
+ */
+
+declare(strict_types=1);
+
+/**
+ * Implements hook_install().
+ */
+function icms_mcp_install(): void {
+  icms_mcp_ensure_source_key_field();
+}
+
+/**
+ * Create the source-key field on every node bundle that lacks it.
+ */
+function icms_mcp_update_10101(): string {
+  $created = icms_mcp_ensure_source_key_field();
+  return $created
+    ? 'Created the source-key field on: ' . implode(', ', $created) . '. Export config (drush cex) so the next config import keeps it.'
+    : 'Source-key field already present on every node bundle.';
+}
