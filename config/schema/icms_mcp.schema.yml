@@ -1,0 +1,15 @@
+icms_mcp.catalog_descriptions:
+  type: config_object
+  label: 'ICMS MCP catalog description overrides'
+  mapping:
+    descriptions:
+      type: ignore
+      label: 'Description overrides keyed by entity type and bundle'
+
+icms_mcp.catalog_options:
+  type: config_object
+  label: 'ICMS MCP Blökkli option overrides'
+  mapping:
+    options:
+      type: ignore
+      label: 'Option definition overrides keyed by option name'

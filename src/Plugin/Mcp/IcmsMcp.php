@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Drupal\icms_mcp\Plugin\Mcp;
 
+use Drupal\icms_mcp\Catalog\IcmsCatalogBuilder;
 use Drupal\Component\Datetime\TimeInterface;
 use Drupal\Core\Access\AccessResult;
 use Drupal\Core\Database\Connection;
@@ -27,7 +28,8 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
  * ICMS MCP plugin — catalog/validate/import/lookup tools for the iqual agent.
  *
  * Tools exposed:
- *   - get_icms_catalog: live node + paragraph + field introspection
+ *   - get_icms_catalog: compact normalized live catalog v2 manifest
+ *   - get_icms_component_contract: targeted resolved bundle contracts
  *   - validate_pivot: validate an icms-drupal-import-handoff-v1 contract
  *   - import_pivot: transactional create/update of node + paragraphs
  *   - lookup_existing_node: idempotency check by source URL
@@ -74,6 +76,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
   protected TimeInterface $time;
   protected ClientInterface $httpClient;
   protected FileSystemInterface $fileSystem;
+  protected IcmsCatalogBuilder $catalogBuilder;
 
   /**
    * {@inheritdoc}
@@ -95,6 +98,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     $instance->time = $container->get('datetime.time');
     $instance->httpClient = $container->get('http_client');
     $instance->fileSystem = $container->get('file_system');
+    $instance->catalogBuilder = $container->get('icms_mcp.catalog_builder');
     return $instance;
   }
 
@@ -105,11 +109,34 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     return [
       new Tool(
         name: 'get_icms_catalog',
-        description: 'Return the live ICMS catalog (nodeTypes, paragraphTypes, allowedParagraphBundles) for this site. The agent uses this in place of the bundled icms-catalog.json so a single deployment works across client sites with different bundle configurations.',
+        description: 'Return the compact normalized ICMS catalog v2 manifest: bundle indexes, capabilities, reusable field/option definitions, descriptions, and catalogHash.',
         inputSchema: [
           'type' => 'object',
           'properties' => (object) [],
           'required' => [],
+        ],
+      ),
+      new Tool(
+        name: 'get_icms_component_contract',
+        description: 'Resolve full live contracts for selected node, paragraph, or media bundles. Optionally includes nested paragraph child bundles.',
+        inputSchema: [
+          'type' => 'object',
+          'properties' => [
+            'entity_type' => [
+              'type' => 'string',
+              'enum' => ['node', 'paragraph', 'media'],
+            ],
+            'bundles' => [
+              'type' => 'array',
+              'items' => ['type' => 'string'],
+              'maxItems' => 25,
+            ],
+            'include_children' => [
+              'type' => 'boolean',
+              'default' => TRUE,
+            ],
+          ],
+          'required' => ['entity_type', 'bundles'],
         ],
       ),
       new Tool(
@@ -219,6 +246,13 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       if ($toolId === 'get_icms_catalog' || $toolId === md5('get_icms_catalog')) {
         return $this->jsonResponse($this->doGetCatalog());
       }
+      if ($toolId === 'get_icms_component_contract' || $toolId === md5('get_icms_component_contract')) {
+        return $this->jsonResponse($this->catalogBuilder->buildComponentContracts(
+          (string) ($arguments['entity_type'] ?? ''),
+          is_array($arguments['bundles'] ?? NULL) ? $arguments['bundles'] : [],
+          (bool) ($arguments['include_children'] ?? TRUE),
+        ));
+      }
       if ($toolId === 'validate_pivot' || $toolId === md5('validate_pivot')) {
         $pivot = $arguments['pivot'] ?? [];
         $log_uri = $this->logReceivedPivot('validate_pivot', $pivot);
@@ -281,113 +315,12 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
 
   // ---- Tool: get_icms_catalog ----------------------------------------------
 
-  /**
-   * Return live introspection of node + paragraph bundles on this site.
-   *
-   * Shape mirrors `backend/agents/content-migrator/icms-catalog.json` so the
-   * orchestrator can swap the bundled catalog for live data without changing
-   * downstream tools (`suggest_icms_layout_mapping`, `build_icms_page_pivot_v1`).
-   */
+  /** Return the compact normalized live catalog v2 manifest. */
   protected function doGetCatalog(): array {
-    $node_types = [];
-    $node_bundles = $this->bundleInfo->getBundleInfo('node');
-    foreach ($node_bundles as $bundle => $info) {
-      $fields = $this->describeFields('node', $bundle);
-      $node_types[$bundle] = [
-        'id' => $bundle,
-        'label' => (string) ($info['label'] ?? $bundle),
-        'fields' => $fields,
-        'paragraphFields' => [],
-      ];
-    }
-
-    $paragraph_types = [];
-    if ($this->entityTypeManager->hasDefinition('paragraph')) {
-      $paragraph_bundles = $this->bundleInfo->getBundleInfo('paragraph');
-      foreach ($paragraph_bundles as $bundle => $info) {
-        $paragraph_types[$bundle] = [
-          'id' => $bundle,
-          'label' => (string) ($info['label'] ?? $bundle),
-          'fields' => $this->describeFields('paragraph', $bundle),
-        ];
-      }
-    }
-
-    // Discover which paragraph bundles are allowed on an icms_page via the
-    // configured layouts field. This is what the agent calls
-    // `allowedParagraphBundles` in the bundled catalog.
-    $allowed = [];
-    $layouts_field = $this->layoutsFieldName();
-    if (isset($node_bundles['icms_page'])) {
-      $defs = $this->fieldManager->getFieldDefinitions('node', 'icms_page');
-      if (isset($defs[$layouts_field])) {
-        $settings = $defs[$layouts_field]->getSetting('handler_settings') ?? [];
-        $target = $settings['target_bundles'] ?? [];
-        $allowed = array_keys($target);
-        sort($allowed);
-        $node_types['icms_page']['paragraphFields'][$layouts_field] = [
-          'cardinality' => $defs[$layouts_field]->getFieldStorageDefinition()->getCardinality(),
-          'targetBundles' => $allowed,
-        ];
-      }
-    }
-
-    return [
-      'status' => 'ok',
-      'format' => 'icms-target-catalog-v1',
-      'site' => [
-        'source_key_field' => $this->sourceKeyFieldName(),
-        'layouts_field' => $layouts_field,
-      ],
-      'nodeTypes' => $node_types,
-      'paragraphTypes' => $paragraph_types,
-      'allowedParagraphBundles' => $allowed,
-    ];
-  }
-
-  /**
-   * Describe configured (non-base) fields on a bundle in the catalog shape.
-   */
-  protected function describeFields(string $entity_type, string $bundle): array {
-    $out = [];
-    $defs = $this->fieldManager->getFieldDefinitions($entity_type, $bundle);
-    foreach ($defs as $name => $def) {
-      // Skip base fields — agent only cares about content fields. FieldConfig
-      // (the persisted kind) all expose getFieldStorageDefinition() with a
-      // FieldStorageConfig instance; base fields use BaseFieldDefinition.
-      if (!$def->getFieldStorageDefinition() instanceof \Drupal\field\FieldStorageConfigInterface) {
-        continue;
-      }
-      $out[$name] = $this->describeField($def);
-    }
-    return $out;
-  }
-
-  /**
-   * Describe a single field definition for the catalog.
-   */
-  protected function describeField(FieldDefinitionInterface $def): array {
-    $type = $def->getType();
-    $cardinality = $def->getFieldStorageDefinition()->getCardinality();
-    $info = [
-      'type' => $type,
-      'fieldType' => $type,
-      'fieldName' => $def->getName(),
-      'label' => (string) $def->getLabel(),
-      'required' => $def->isRequired(),
-      'cardinality' => $cardinality,
-    ];
-    // For entity_reference-style fields, surface the target bundles too — the
-    // agent needs this to know which paragraph types can sit in which slot.
-    if (in_array($type, ['entity_reference', 'entity_reference_revisions'], TRUE)) {
-      $info['target_type'] = $def->getSetting('target_type');
-      $info['targetType'] = $info['target_type'];
-      $handler_settings = $def->getSetting('handler_settings') ?? [];
-      $target_bundles = $handler_settings['target_bundles'] ?? [];
-      $info['target_bundles'] = array_values(array_keys($target_bundles));
-      $info['targetBundles'] = $info['target_bundles'];
-    }
-    return $info;
+    return $this->catalogBuilder->buildManifest(
+      $this->sourceKeyFieldName(),
+      $this->layoutsFieldName(),
+    );
   }
 
   // ---- Tool: validate_pivot ------------------------------------------------
@@ -423,6 +356,9 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     }
 
     $node_attrs = $node['attributes'] ?? [];
+    $para_bundles = $this->entityTypeManager->hasDefinition('paragraph')
+      ? $this->bundleInfo->getBundleInfo('paragraph')
+      : [];
     if (empty($node_attrs['title'])) {
       $issues[] = ['path' => '/drupal_import/node/attributes/title', 'code' => 'missing', 'message' => 'title is required.'];
     }
@@ -435,14 +371,13 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         }
         if (!isset($node_defs[$name])) {
           $issues[] = ['path' => "/drupal_import/node/attributes/{$name}", 'code' => 'unknown_field', 'message' => "Field '{$name}' does not exist on node:{$node_bundle}."];
+          continue;
         }
+        $this->validateStructuredField($node_defs[$name], $value, "/drupal_import/node/attributes/{$name}", $para_bundles, $issues);
       }
     }
 
     $paragraphs = $import['paragraphs'] ?? [];
-    $para_bundles = $this->entityTypeManager->hasDefinition('paragraph')
-      ? $this->bundleInfo->getBundleInfo('paragraph')
-      : [];
     foreach ($paragraphs as $i => $para) {
       $type_raw = $para['type'] ?? '';
       $bundle = $this->stripJsonApiPrefix($type_raw);
@@ -705,12 +640,22 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       $old_ref_ids = [];
     }
 
-    $media_count = 0;
-    $this->applyNodeAttributes($node, $node_attrs, $media_count);
-    $node->set($this->sourceKeyFieldName(), $idempotence_key);
-
     $created_paragraphs = [];
     $child_paragraph_count = 0;
+    $media_count = 0;
+    $this->applyNodeAttributes(
+      $node,
+      $node_attrs,
+      $media_count,
+      $paragraph_storage,
+      $old_ref_ids,
+      $child_paragraph_count,
+    );
+    $source_key_field = $this->sourceKeyFieldName();
+    $node->set(
+      $source_key_field,
+      $this->normalizeFieldValue($node->getFieldDefinition($source_key_field), $idempotence_key),
+    );
     if ($paragraphs && $paragraph_storage !== NULL) {
       $sorted = $this->sortParagraphsBySequence($paragraphs);
       foreach ($sorted as $para) {
@@ -1414,7 +1359,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       return;
     }
 
-    $entity->set($name, $value);
+    $entity->set($name, $this->normalizeFieldValue($definition, $value));
   }
 
   /**
@@ -1545,12 +1490,15 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     ]);
     $field_value = ['target_id' => $file->id()];
     if ($source_type === 'image') {
-      $field_value['alt'] = $this->firstNonEmptyString([
+      $field_value['alt'] = $this->truncateString($this->firstNonEmptyString([
         $value['alt'] ?? NULL,
         $value['title'] ?? NULL,
         $this->mediaName($value, $url, $file),
-      ]);
-      $field_value['title'] = $this->firstNonEmptyString([$value['title'] ?? NULL]);
+      ]), 512);
+      $field_value['title'] = $this->truncateString(
+        $this->firstNonEmptyString([$value['title'] ?? NULL]),
+        1024,
+      );
     }
     $media->set($source_field, $field_value);
     $this->validateAndSaveMedia($media);
@@ -1620,7 +1568,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       }
       $url_filename = $decoded;
     }
-    return $this->firstNonEmptyString([
+    $name = $this->firstNonEmptyString([
       $value['alt'] ?? NULL,
       $value['title'] ?? NULL,
       $value['filename'] ?? NULL,
@@ -1628,6 +1576,10 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       $url_filename,
       'Imported media',
     ]);
+    // Drupal media names are strings with a hard 255-character limit. Keep
+    // the complete alt text on the image field, but bound the administrative
+    // media entity label independently.
+    return $this->truncateString($name, 255);
   }
 
   /**
@@ -1640,6 +1592,47 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       }
     }
     return '';
+  }
+
+  /** Truncate a Unicode string to a hard storage limit. */
+  protected function truncateString(string $value, int $max_length): string {
+    if ($max_length <= 0 || mb_strlen($value) <= $max_length) {
+      return $value;
+    }
+    return $max_length === 1 ? '…' : mb_substr($value, 0, $max_length - 1) . '…';
+  }
+
+  /** Normalize values according to live field storage constraints. */
+  protected function normalizeFieldValue(FieldDefinitionInterface $definition, mixed $value): mixed {
+    $field_type = $definition->getType();
+    $max_length = (int) ($definition->getSetting('max_length') ?? 0);
+    if ($max_length > 0 && in_array($field_type, ['string', 'string_long'], TRUE)) {
+      if (is_string($value)) {
+        return $this->truncateString($value, $max_length);
+      }
+      if (is_array($value)) {
+        foreach ($value as &$item) {
+          if (is_string($item)) {
+            $item = $this->truncateString($item, $max_length);
+          }
+          elseif (is_array($item) && isset($item['value']) && is_string($item['value'])) {
+            $item['value'] = $this->truncateString($item['value'], $max_length);
+          }
+        }
+        unset($item);
+      }
+    }
+    if ($field_type === 'link' && is_array($value)) {
+      $items = array_is_list($value) ? $value : [$value];
+      foreach ($items as &$item) {
+        if (is_array($item) && isset($item['title']) && is_string($item['title'])) {
+          $item['title'] = $this->truncateString($item['title'], 255);
+        }
+      }
+      unset($item);
+      return array_is_list($value) ? $items : ($items[0] ?? $value);
+    }
+    return $value;
   }
 
   /**
@@ -1662,7 +1655,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
    */
   protected function downloadRemoteFile(string $url): \Drupal\file\FileInterface {
     $path = (string) parse_url($url, PHP_URL_PATH);
-    $extension = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
+    $extension = $this->mediaExtensionFromPath($path);
     $extension = preg_match('/^[a-z0-9]{1,8}$/', $extension) ? '.' . $extension : '';
     $directory = 'public://icms_mcp';
     $this->fileSystem->prepareDirectory(
@@ -1727,7 +1720,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     if (in_array('remote_video', $allowed, TRUE) && preg_match('/(?:youtube\.com|youtu\.be|vimeo\.com)$/', $host)) {
       return 'remote_video';
     }
-    $extension = strtolower((string) pathinfo((string) parse_url($url, PHP_URL_PATH), PATHINFO_EXTENSION));
+    $extension = $this->mediaExtensionFromPath((string) parse_url($url, PHP_URL_PATH));
     if ($extension === 'svg') {
       return in_array('icon', $allowed, TRUE) ? 'icon' : NULL;
     }
@@ -1738,6 +1731,23 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       return 'image';
     }
     return $allowed[0] ?? NULL;
+  }
+
+  /**
+   * Detect an asset extension even when a CDN appends transform path segments.
+   *
+   * Example: Storyblok uses `photo.jpg/m/100x69/filters:format(webp)`;
+   * pathinfo() sees no extension because the final segment is the filter.
+   */
+  protected function mediaExtensionFromPath(string $path): string {
+    if (preg_match('/filters:format\((png|gif|jpe?g|webp)\)/i', $path, $format_match)) {
+      return strtolower($format_match[1]);
+    }
+    if (preg_match_all('/\.(svg|png|gif|jpe?g|webp|mp4|webm|mov|m4v)(?:\/|$)/i', $path, $matches) && !empty($matches[1])) {
+      return strtolower((string) end($matches[1]));
+    }
+    $extension = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
+    return preg_match('/^[a-z0-9]{1,8}$/', $extension) ? $extension : '';
   }
 
   /**
@@ -1801,13 +1811,27 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
   }
 
   /**
-   * Apply pivot node.attributes to a Node entity. Body is unwrapped to its
-   * canonical structured shape; everything else is set verbatim if the field
-   * exists, ignored otherwise (validation already flagged unknowns).
+   * Apply pivot node.attributes to a Node entity.
+   *
+   * Body is unwrapped to its canonical structured shape. Node-level
+   * paragraph fields (native bundles' own child elements) are materialized
+   * recursively when a paragraph storage is provided — the default-language
+   * import path — and left untouched otherwise: the translation path applies
+   * scalar fields only, because node-level children are shared across
+   * languages exactly like the layouts field. Every other field resolves
+   * through setEntityField (media, taxonomy, tablefield, field-limit
+   * normalization); unknown fields are ignored (validation flagged them).
    */
-  protected function applyNodeAttributes(\Drupal\node\NodeInterface $node, array $attrs, int &$media_count): void {
+  protected function applyNodeAttributes(
+    \Drupal\node\NodeInterface $node,
+    array $attrs,
+    int &$media_count,
+    $paragraph_storage = NULL,
+    array &$old_ref_ids = [],
+    int &$child_paragraph_count = 0,
+  ): void {
     if (isset($attrs['title'])) {
-      $node->setTitle((string) $attrs['title']);
+      $node->setTitle($this->truncateString((string) $attrs['title'], 255));
     }
     if (isset($attrs['langcode']) && $node->hasField('langcode')) {
       $node->set('langcode', $attrs['langcode']);
@@ -1829,6 +1853,39 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         continue;
       }
       if ($node->hasField($name)) {
+        $definition = $node->getFieldDefinition($name);
+        if ($definition->getType() === 'entity_reference_revisions' && (string) ($definition->getSetting('target_type') ?? '') === 'paragraph') {
+          if ($paragraph_storage === NULL) {
+            // Translation path: node-level children are shared across
+            // languages — leave them to the default-language import.
+            continue;
+          }
+          foreach ($node->get($name) as $existing_item) {
+            $target_id = (int) ($existing_item->target_id ?? 0);
+            if ($target_id > 0) {
+              $old_ref_ids[$target_id] = $target_id;
+            }
+          }
+          $references = [];
+          foreach ($this->normalizeList($value) as $child_spec) {
+            if (!is_array($child_spec)) {
+              throw new \InvalidArgumentException("Child value for node field '{$name}' must be an object.");
+            }
+            $child = $this->createParagraphFromSpec(
+              $child_spec,
+              $paragraph_storage,
+              $child_paragraph_count,
+              $media_count,
+            );
+            $references[] = [
+              'target_id' => $child->id(),
+              'target_revision_id' => $child->getRevisionId(),
+            ];
+            $child_paragraph_count++;
+          }
+          $node->set($name, $references);
+          continue;
+        }
         $this->setEntityField($node, $name, $value, $media_count);
       }
     }

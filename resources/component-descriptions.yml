@@ -1,0 +1,85 @@
+descriptions:
+  node:
+    icms_page: { summary: "General editorial page when no more specific structured content type applies." }
+    icms_news: { summary: "Dated news or blog detail article; use for an individual story, not a news listing." }
+    icms_event: { summary: "Event detail with one or more scheduled occurrences; use only when a concrete date or event schema is present." }
+    icms_project: { summary: "Project or case-study detail describing a bounded initiative, programme or completed engagement." }
+    icms_pressrelease: { summary: "Official press release detail, distinct from ordinary editorial news." }
+    icms_product: { summary: "Product detail page for one identifiable offering." }
+    icms_people: { summary: "Individual person or team-member profile, not a team listing." }
+    icms_location: { summary: "Individual physical location with address or coordinates." }
+    icms_contenthub: { summary: "Long-form Content Hub article when the site distinguishes it from ordinary news." }
+  paragraph:
+    icms_layout_2_col_text_elements: { role: layout, summary: "Two-column collection of key questions or paired text elements; unlike FAQ it does not require disclosure answers.", minItems: 2 }
+    icms_layout_call_to_action: { role: layout, summary: "Prominent conversion section combining a concise message with one or more action buttons." }
+    icms_layout_collapsible: { role: layout, summary: "Expandable long-form content where readers reveal sections on demand." }
+    icms_layout_contact: { role: layout, summary: "Contact information and actions such as email, phone, booking links or contact forms." }
+    icms_layout_contenthub: { role: layout, summary: "Listing of structured Content Hub entities; use references rather than recreating entries as cards." }
+    icms_layout_downloads: { role: layout, summary: "Collection of downloadable documents with labels and optional supporting text.", minItems: 1 }
+    icms_layout_event: { role: layout, summary: "Listing or reference display for structured Event nodes; not a generic hand-authored card grid." }
+    icms_layout_flip_teasers: { role: layout, summary: "Interactive promotional teasers that reveal additional content.", minItems: 2 }
+    icms_layout_hero_image: { role: layout, summary: "Primary page-opening hero with a dominant image, title and optional call to action." }
+    icms_layout_iframe: { role: layout, summary: "Embedded external application or document delivered through an iframe." }
+    icms_layout_link_lists: { role: layout, summary: "Grouped navigation links where destinations, rather than descriptive cards, are the primary content.", minItems: 2 }
+    icms_layout_location: { role: layout, summary: "Listing or reference display for structured Location nodes." }
+    icms_layout_media: { role: layout, summary: "Standalone raster image, video or remote video with little or no explanatory text." }
+    icms_layout_news: { role: layout, summary: "Listing or reference display for structured News nodes; detail pages should migrate to the News node bundle." }
+    icms_layout_partnerships: { role: layout, summary: "Collection of partner logos or quality seals used to establish trust.", minItems: 2 }
+    icms_layout_people: { role: layout, summary: "Listing or reference display for structured People entities." }
+    icms_layout_pressrelease: { role: layout, summary: "Listing or reference display for structured Press Release nodes." }
+    icms_layout_product: { role: layout, summary: "Listing or reference display for structured Product nodes." }
+    icms_layout_project: { role: layout, summary: "Listing or reference display for structured Project nodes." }
+    icms_layout_table: { role: layout, summary: "Rows and columns of genuinely tabular data; do not use for visual alignment alone." }
+    icms_layout_tabs: { role: layout, summary: "Several peer content panels selected through tabs.", minItems: 2 }
+    icms_layout_team: { role: layout, summary: "Hand-authored profiles of multiple team members with contact details and portraits.", minItems: 2 }
+    icms_layout_teasers: { role: layout, summary: "Collection of concise promotional previews linking to deeper content.", minItems: 2 }
+    icms_layout_testimonial: { role: layout, summary: "Client or customer proof centered on one featured reference." }
+    icms_layout_testimonials: { role: layout, summary: "Collection of customer quotations or endorsements.", minItems: 2 }
+    icms_layout_timeline: { role: layout, summary: "Chronological sequence of dated or ordered milestones.", minItems: 2 }
+    icms_layout_text:
+      role: layout
+      summary: "General rich-text section without a primary media asset."
+      useWhen: ["The section contains headings, paragraphs, lists or tables but no primary media."]
+      avoidWhen: ["A primary image, SVG, repeated collection or FAQ structure is present."]
+      similarTo: [icms_layout_text_media]
+    icms_layout_text_media:
+      role: layout
+      summary: "Text accompanied by one raster image or video."
+      useWhen: ["One image or video belongs to the explanatory text."]
+      avoidWhen: ["The media is SVG/icon or there are two or more repeated items."]
+      similarTo: [icms_layout_textcol_iconlist, icms_layout_cards]
+    icms_layout_text_image_intro:
+      role: layout
+      summary: "Featured introductory text with one raster image; use only when the image is part of the page introduction."
+      useWhen: ["An opening introduction combines substantial lead copy with one raster image."]
+      avoidWhen: ["There is no image, the media is SVG, or the section is ordinary body content."]
+      similarTo: [icms_layout_text_media]
+    icms_layout_textcol_iconlist:
+      role: layout
+      summary: "Text with one or more SVG/icon elements."
+      useWhen: ["The section contains explanatory text and SVG/icon media."]
+      avoidWhen: ["The media is a raster image or video."]
+      similarTo: [icms_layout_text_media, icms_layout_cards]
+    icms_layout_cards:
+      role: layout
+      summary: "Collection of two or more repeated cards with title, text and optional image/icon."
+      useWhen: ["At least two sibling items share the same semantic structure."]
+      avoidWhen: ["There is only one media item; use text-media or icon-list instead."]
+      similarTo: [icms_layout_teasers, icms_layout_textcol_iconlist]
+      minItems: 2
+    icms_layout_faq:
+      role: layout
+      summary: "Collection of question-and-answer disclosure items."
+      useWhen: ["The source contains explicit questions with associated answers."]
+      avoidWhen: ["The content is a generic list or repeated cards."]
+      minItems: 1
+    icms_layout_gallery:
+      role: layout
+      summary: "Collection of raster images with little supporting text."
+      useWhen: ["Several images form a visual gallery."]
+      avoidWhen: ["Images are SVG icons or each item has substantial card content."]
+      minItems: 2
+    icms_card_element: { role: element, summary: "One item inside a cards layout; supports raster image or SVG icon." }
+    icms_icon_text_element: { role: element, summary: "One SVG/icon with an optional title and short plain text." }
+    icms_faq_element: { role: element, summary: "One question and answer inside an FAQ layout." }
+    icms_button_element: { role: element, summary: "One call-to-action link rendered as a button." }

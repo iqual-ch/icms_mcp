@@ -1,6 +1,6 @@
 name: 'ICMS MCP'
 type: module
-description: 'Exposes ICMS-specific MCP tools (catalog, validation, transactional import, idempotency lookup) consumed by the iqual ai-platform drupal-bridge agent.'
+description: 'Exposes normalized ICMS catalog v2, targeted contracts, validation, transactional import, and idempotency lookup tools.'
 package: 'iqual'
 core_version_requirement: ^10 || ^11
 dependencies:
