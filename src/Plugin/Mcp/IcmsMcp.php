@@ -975,18 +975,23 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
   }
 
   /**
-   * Create/update node translations, each with its own paragraph set.
+   * Create/update node translations under the symmetric paragraph model.
    *
-   * PageDesigner sources are asymmetric: the per-language composition trees
-   * can differ, so when the layouts field is translatable every translation
-   * receives its own paragraph entities. When the field is not translatable
-   * the translation gets its scalar fields only and the summary says so —
-   * shared paragraphs are never silently replaced per language.
+   * ICMS keeps the layouts field non-translatable (one paragraph set shared
+   * across languages). A translation whose paragraph structure matches the
+   * default language's (`structureMatch: true`, stamped by the agent and
+   * re-verified here) is written INTO translations of the shared paragraph
+   * entities, matched by position. A mismatched language
+   * (`structureMatch: false`, shipped without paragraphs) gets scalar node
+   * fields only, with the reason in the summary — shared paragraphs are
+   * never silently replaced per language. When a target's layouts field IS
+   * translatable, the legacy per-language paragraph set path still applies.
    *
    * @param int $nid
    *   The saved default-language node ID.
    * @param array $translations
-   *   Translation specs ({langcode, node.attributes, paragraphs}).
+   *   Translation specs
+   *   ({langcode, node.attributes, paragraphs, structureMatch?, structureReason?}).
    *
    * @return array
    *   One summary entry per requested translation.
@@ -1040,6 +1045,9 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         ? $translation_spec['paragraphs']
         : [];
       $paragraphs_translated = FALSE;
+      $paragraphs_mode = 'shared';
+      $symmetric_reason = NULL;
+      $untranslated_fields = [];
       $old_ref_ids = [];
       $field_definition = $translation->hasField($layouts_field)
         ? $translation->getFieldDefinition($layouts_field)
@@ -1076,6 +1084,41 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         }
         $translation->set($layouts_field, $created);
         $paragraphs_translated = TRUE;
+        $paragraphs_mode = 'per_language_set';
+      }
+      elseif (
+        $paragraph_specs
+        && $paragraph_storage !== NULL
+        && $field_definition !== NULL
+        && ($translation_spec['structureMatch'] ?? NULL) === TRUE
+      ) {
+        // Symmetric model: the layouts field is shared across languages, and
+        // the agent verified this language's paragraph structure matches the
+        // default language's. Write its content into translations of the
+        // shared paragraph entities, matched by position — after our own
+        // verification pass, so a drifted target never gets half-translated.
+        try {
+          $shared = $this->loadSharedParagraphs($node, $layouts_field);
+          $specs = $this->sortParagraphsBySequence($paragraph_specs);
+          $symmetric_reason = $this->verifySharedParagraphStructure($shared, $specs);
+          if ($symmetric_reason === NULL) {
+            foreach ($specs as $index => $para) {
+              $para_fields = $para['attributes'] ?? $para['fields'] ?? [];
+              $this->translateParagraphRecursive(
+                $shared[$index],
+                is_array($para_fields) ? $para_fields : [],
+                $langcode,
+                $media_count,
+                $untranslated_fields,
+              );
+            }
+            $paragraphs_translated = TRUE;
+            $paragraphs_mode = 'symmetric';
+          }
+        }
+        catch (\Throwable $e) {
+          $symmetric_reason = 'symmetric translation failed: ' . $e->getMessage();
+        }
       }
 
       $translation->save();
@@ -1099,15 +1142,156 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         'action' => $exists ? 'updated' : 'created',
         'paragraph_count' => count($paragraph_specs),
         'paragraphs_translated' => $paragraphs_translated,
+        'paragraphs_mode' => $paragraphs_mode,
         'media_count' => $media_count,
       ];
-      if ($paragraph_specs && !$paragraphs_translated) {
-        $entry['reason'] = "Field {$layouts_field} is not translatable; scalar fields were translated, paragraphs stay shared.";
+      if (($translation_spec['structureMatch'] ?? NULL) === FALSE) {
+        $entry['reason'] = (string) ($translation_spec['structureReason']
+          ?? 'paragraph structure differs from the default language; sections not imported.');
+      }
+      elseif ($paragraph_specs && !$paragraphs_translated) {
+        $entry['reason'] = $symmetric_reason !== NULL
+          ? "Symmetric translation aborted ({$symmetric_reason}); scalar fields were translated, paragraphs stay shared."
+          : "Field {$layouts_field} is not translatable; scalar fields were translated, paragraphs stay shared.";
+      }
+      if ($untranslated_fields) {
+        // Fields whose target config keeps them shared across languages —
+        // step-2 setup work (mark them translatable), not a migration error.
+        $entry['untranslated_fields'] = array_values(array_unique($untranslated_fields));
       }
       $summary[] = $entry;
     }
 
     return $summary;
+  }
+
+  /**
+   * Ordered shared paragraph entities referenced by the default language.
+   */
+  protected function loadSharedParagraphs(\Drupal\node\NodeInterface $node, string $layouts_field): array {
+    $entities = [];
+    if (!$node->hasField($layouts_field)) {
+      return $entities;
+    }
+    foreach ($node->get($layouts_field) as $item) {
+      $entity = $item->entity ?? NULL;
+      if ($entity instanceof \Drupal\paragraphs\ParagraphInterface) {
+        $entities[] = $entity;
+      }
+    }
+    return $entities;
+  }
+
+  /**
+   * Verify translation specs align with the shared paragraphs positionally.
+   *
+   * Checks counts and bundles at every nesting level BEFORE any write, so a
+   * target that drifted from the pivot (manual edits, partial earlier import)
+   * never ends up with answers attached to the wrong questions. Returns NULL
+   * on a full match, otherwise a human-readable mismatch description.
+   */
+  protected function verifySharedParagraphStructure(array $entities, array $specs, int $depth = 0): ?string {
+    if ($depth > 8) {
+      return 'paragraph nesting exceeds the supported depth of 8';
+    }
+    if (count($entities) !== count($specs)) {
+      return sprintf('%d paragraphs on the target, %d in the translation', count($entities), count($specs));
+    }
+    foreach (array_values($specs) as $index => $spec) {
+      if (!is_array($spec)) {
+        return sprintf('position %d: translation paragraph is not an object', $index);
+      }
+      $entity = $entities[$index];
+      $bundle = $this->stripJsonApiPrefix((string) ($spec['type'] ?? ''));
+      if ($bundle !== '' && $bundle !== $entity->bundle()) {
+        return sprintf("position %d: bundle '%s' on the target, '%s' in the translation", $index, $entity->bundle(), $bundle);
+      }
+      $fields = $spec['attributes'] ?? $spec['fields'] ?? [];
+      if (!is_array($fields)) {
+        continue;
+      }
+      foreach ($fields as $name => $value) {
+        if (!$entity->hasField($name)) {
+          continue;
+        }
+        $definition = $entity->getFieldDefinition($name);
+        if ($definition->getType() !== 'entity_reference_revisions' || (string) ($definition->getSetting('target_type') ?? '') !== 'paragraph') {
+          continue;
+        }
+        $child_entities = [];
+        foreach ($entity->get($name) as $item) {
+          if (($item->entity ?? NULL) instanceof \Drupal\paragraphs\ParagraphInterface) {
+            $child_entities[] = $item->entity;
+          }
+        }
+        $mismatch = $this->verifySharedParagraphStructure($child_entities, $this->normalizeList($value), $depth + 1);
+        if ($mismatch !== NULL) {
+          return sprintf('position %d, field %s: %s', $index, $name, $mismatch);
+        }
+      }
+    }
+    return NULL;
+  }
+
+  /**
+   * Write one language's content into translations of a shared paragraph.
+   *
+   * Symmetric model: only translatable fields are written — a
+   * non-translatable field keeps its shared value and is reported in
+   * `untranslated_fields` (making it translatable is target setup, not a
+   * migration error). Child paragraph references recurse positionally; the
+   * structure was verified up front. Blökkli behavior settings are
+   * entity-level, so they stay shared.
+   */
+  protected function translateParagraphRecursive(
+    \Drupal\paragraphs\ParagraphInterface $paragraph,
+    array $fields,
+    string $langcode,
+    int &$media_count,
+    array &$untranslated_fields,
+    int $depth = 0,
+  ): void {
+    if ($depth > 8) {
+      throw new \RuntimeException('Paragraph nesting exceeds the supported depth of 8.');
+    }
+    $translation = $paragraph->hasTranslation($langcode)
+      ? $paragraph->getTranslation($langcode)
+      : $paragraph->addTranslation($langcode, []);
+    foreach ($fields as $name => $value) {
+      if (!$translation->hasField($name)) {
+        continue;
+      }
+      $definition = $translation->getFieldDefinition($name);
+      if ($definition->getType() === 'entity_reference_revisions' && (string) ($definition->getSetting('target_type') ?? '') === 'paragraph') {
+        $child_entities = [];
+        foreach ($paragraph->get($name) as $item) {
+          if (($item->entity ?? NULL) instanceof \Drupal\paragraphs\ParagraphInterface) {
+            $child_entities[] = $item->entity;
+          }
+        }
+        foreach (array_values($this->normalizeList($value)) as $index => $child_spec) {
+          if (!is_array($child_spec) || !isset($child_entities[$index])) {
+            continue;
+          }
+          $child_fields = $child_spec['fields'] ?? $child_spec['attributes'] ?? [];
+          $this->translateParagraphRecursive(
+            $child_entities[$index],
+            is_array($child_fields) ? $child_fields : [],
+            $langcode,
+            $media_count,
+            $untranslated_fields,
+            $depth + 1,
+          );
+        }
+        continue;
+      }
+      if (!$definition->isTranslatable()) {
+        $untranslated_fields[] = $name;
+        continue;
+      }
+      $this->setEntityField($translation, $name, $value, $media_count);
+    }
+    $translation->save();
   }
 
   /**
