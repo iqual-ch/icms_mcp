@@ -658,6 +658,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     );
     if ($paragraphs && $paragraph_storage !== NULL) {
       $sorted = $this->sortParagraphsBySequence($paragraphs);
+      $paragraph_langcode = $node->language()->getId();
       foreach ($sorted as $para) {
         $entity = $this->createParagraphFromSpec(
           [
@@ -668,6 +669,8 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
           $paragraph_storage,
           $child_paragraph_count,
           $media_count,
+          0,
+          $paragraph_langcode,
         );
         $created_paragraphs[] = [
           'target_id' => $entity->id(),
@@ -1248,6 +1251,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     int &$child_paragraph_count,
     int &$media_count,
     int $depth = 0,
+    string $langcode = '',
   ): \Drupal\paragraphs\ParagraphInterface {
     if ($depth > 8) {
       throw new \RuntimeException('Paragraph nesting exceeds the supported depth of 8.');
@@ -1258,8 +1262,15 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       throw new \InvalidArgumentException('Nested paragraph is missing its type.');
     }
 
+    // Paragraphs must be born in the node's language, not the site default:
+    // otherwise the default-language content is stored under the wrong
+    // langcode and a later translation write for the site default language
+    // OVERWRITES it (symmetric translations match by position on the shared
+    // paragraph set, so the language identity of the base row is load-bearing).
     /** @var \Drupal\paragraphs\ParagraphInterface $entity */
-    $entity = $paragraph_storage->create(['type' => $bundle]);
+    $entity = $paragraph_storage->create(
+      ['type' => $bundle] + ($langcode !== '' ? ['langcode' => $langcode] : []),
+    );
     $fields = $spec['fields'] ?? $spec['attributes'] ?? [];
     if (!is_array($fields)) {
       throw new \InvalidArgumentException("Fields for paragraph '{$bundle}' must be an object.");
@@ -1285,6 +1296,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
             $child_paragraph_count,
             $media_count,
             $depth + 1,
+            $langcode,
           );
           $references[] = [
             'target_id' => $child->id(),
@@ -1876,6 +1888,8 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
               $paragraph_storage,
               $child_paragraph_count,
               $media_count,
+              0,
+              (string) ($attrs['langcode'] ?? $node->language()->getId()),
             );
             $references[] = [
               'target_id' => $child->id(),
