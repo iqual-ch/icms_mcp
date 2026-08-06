@@ -1655,15 +1655,32 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         unset($item);
       }
     }
-    if ($field_type === 'link' && is_array($value)) {
-      $items = array_is_list($value) ? $value : [$value];
-      foreach ($items as &$item) {
-        if (is_array($item) && isset($item['title']) && is_string($item['title'])) {
-          $item['title'] = $this->truncateString($item['title'], 255);
-        }
+    if ($field_type === 'link') {
+      // A bare site-relative path is not a valid link-field URI (LinkItem
+      // requires a scheme; entity_usage throws on every save otherwise).
+      $normalize_uri = static fn (string $uri): string =>
+        str_starts_with($uri, '/') ? 'internal:' . $uri : $uri;
+      if (is_string($value)) {
+        return $normalize_uri($value);
       }
-      unset($item);
-      return array_is_list($value) ? $items : ($items[0] ?? $value);
+      if (is_array($value)) {
+        $items = array_is_list($value) ? $value : [$value];
+        foreach ($items as &$item) {
+          if (is_array($item)) {
+            if (isset($item['title']) && is_string($item['title'])) {
+              $item['title'] = $this->truncateString($item['title'], 255);
+            }
+            if (isset($item['uri']) && is_string($item['uri'])) {
+              $item['uri'] = $normalize_uri($item['uri']);
+            }
+          }
+          elseif (is_string($item)) {
+            $item = $normalize_uri($item);
+          }
+        }
+        unset($item);
+        return array_is_list($value) ? $items : ($items[0] ?? $value);
+      }
     }
     return $value;
   }
