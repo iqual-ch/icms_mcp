@@ -509,6 +509,23 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     $source_url = $this->extractSourceUrl($idempotence_key);
     $existing_nid = $this->findNodeBySourceUrl($node_bundle, $source_field, $source_url);
 
+    // The idempotency lookup is bundle-scoped, so a page re-imported under a
+    // corrected bundle (news instead of page) creates a NEW node and the old
+    // one silently remains. Surface the cross-bundle twin so the caller can
+    // delete or keep it deliberately.
+    $bundle_conflict = NULL;
+    if ($existing_nid === NULL) {
+      $other_nid = $this->findNodeBySourceUrl(NULL, $source_field, $source_url);
+      if ($other_nid !== NULL) {
+        $other = $this->entityTypeManager->getStorage('node')->load($other_nid);
+        $bundle_conflict = [
+          'nid' => $other_nid,
+          'bundle' => $other?->bundle(),
+          'warning' => "A node with the same source key already exists as '" . ($other?->bundle() ?? '?') . "' (nid {$other_nid}). This import creates a separate '{$node_bundle}' node — delete the old one if the bundle mapping changed.",
+        ];
+      }
+    }
+
     // 4. Apply strategy.
     if ($existing_nid !== NULL) {
       switch ($strategy) {
@@ -571,6 +588,10 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
       $result['idempotence_key'] = $idempotence_key;
       $result['strategy'] = $strategy;
       $result['action'] = $existing_nid === NULL ? 'created' : 'updated';
+      if ($bundle_conflict !== NULL) {
+        $result['bundle_conflict'] = $bundle_conflict;
+        $result['warnings'] = array_merge($result['warnings'] ?? [], [$bundle_conflict['warning']]);
+      }
       return $this->journal($result['action'], array_merge($result, [
         'batch_id' => $batch_id,
         'run_id' => $run_id,
@@ -1850,6 +1871,28 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
     }
     if (array_key_exists('status', $attrs)) {
       $node->setPublished((bool) $attrs['status']);
+    }
+    // Content moderation derives BOTH the published flag and whether the
+    // saved revision becomes the live (default) revision from
+    // moderation_state. Without setting it, imports of moderated bundles
+    // save as 'draft': updates become forward revisions that never go live,
+    // and the old-paragraph cleanup then deletes paragraphs the still-live
+    // revision references (live incident: every updated page lost its
+    // paragraphs). Publish state is resolved from the entity's workflow, not
+    // hardcoded, so custom workflows keep working.
+    if ($node->hasField('moderation_state') && \Drupal::hasService('content_moderation.moderation_information')) {
+      /** @var \Drupal\content_moderation\ModerationInformationInterface $moderation_information */
+      $moderation_information = \Drupal::service('content_moderation.moderation_information');
+      $workflow = $moderation_information->getWorkflowForEntity($node);
+      if ($workflow !== NULL) {
+        $published = array_key_exists('status', $attrs) ? (bool) $attrs['status'] : $node->isPublished();
+        foreach ($workflow->getTypePlugin()->getStates() as $state) {
+          if ($state->isDefaultRevisionState() && $state->isPublishedState() === $published) {
+            $node->set('moderation_state', $state->id());
+            break;
+          }
+        }
+      }
     }
     if (isset($attrs['body']) && $node->hasField('body')) {
       $body = $attrs['body'];
