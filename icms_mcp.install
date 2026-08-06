@@ -3,8 +3,8 @@
 /**
  * @file
  * Install/update hooks: source-key field coverage on all node bundles, the
- * MCP service account (role + user) the agent authenticates as, and the
- * hardened MCP endpoint configuration (auth on, icms-mcp plugin only).
+ * MCP service account (role + passwordless user), and the OAuth 2.1
+ * client_credentials client (keys, scope, consumer) tokens act through.
  */
 
 declare(strict_types=1);
@@ -14,12 +14,17 @@ declare(strict_types=1);
  */
 function icms_mcp_install(): void {
   icms_mcp_ensure_source_key_field();
-  icms_mcp_configure_mcp_endpoint();
-  $password = icms_mcp_ensure_service_account();
-  if ($password !== NULL) {
+  icms_mcp_ensure_service_account();
+  // Legacy drupal/mcp endpoint hardening — transition only, skipped once
+  // that module is gone.
+  if (\Drupal::moduleHandler()->moduleExists('mcp')) {
+    icms_mcp_configure_mcp_endpoint();
+  }
+  $credentials = icms_mcp_ensure_oauth_client();
+  if ($credentials !== NULL) {
     \Drupal::messenger()->addStatus(t(
-      'Created MCP service user %name with password %password — shown only this once; rotate with `drush upwd %name`. Export config (drush cex) so the icms_mcp role survives the next config import.',
-      ['%name' => ICMS_MCP_SERVICE_ACCOUNT, '%password' => $password],
+      'Created the ICMS MCP OAuth client — client_id %id, client_secret %secret. Shown only this once: paste both into the cockpit connection form. Rotate with `drush icms-mcp:rotate-secret`. Export config (drush cex) so the consumer, scope, and role survive the next config import.',
+      ['%id' => $credentials['client_id'], '%secret' => $credentials['client_secret']],
     ));
   }
 }
@@ -28,11 +33,13 @@ function icms_mcp_install(): void {
  * Implements hook_uninstall().
  *
  * The module is enabled per site only during its migration window; removing
- * it must leave no standing credential behind.
+ * it must leave no standing credential behind (consumer, scope, user, role).
  */
 function icms_mcp_uninstall(): void {
   icms_mcp_remove_service_account();
-  icms_mcp_release_mcp_endpoint();
+  if (\Drupal::moduleHandler()->moduleExists('mcp')) {
+    icms_mcp_release_mcp_endpoint();
+  }
 }
 
 /**
@@ -49,21 +56,37 @@ function icms_mcp_update_10101(): string {
  * Create the MCP service role + user on already-installed sites.
  */
 function icms_mcp_update_10102(): string {
-  $password = icms_mcp_ensure_service_account();
-  if ($password !== NULL) {
-    return 'Created MCP service user ' . ICMS_MCP_SERVICE_ACCOUNT . " with password {$password} — shown only this once; rotate with drush upwd. Export config (drush cex) so the role survives the next config import.";
-  }
-  return 'MCP service role ensured; the ' . ICMS_MCP_SERVICE_ACCOUNT . ' user already existed (password untouched).';
+  icms_mcp_ensure_service_account();
+  return 'MCP service role + user ensured.';
 }
 
 /**
- * Harden the MCP endpoint: auth + basic auth on, icms-mcp only, no drush.
+ * Harden the legacy drupal/mcp endpoint (transition only).
  */
 function icms_mcp_update_10103(): string {
+  if (!\Drupal::moduleHandler()->moduleExists('mcp')) {
+    return 'Legacy drupal/mcp not installed — nothing to harden.';
+  }
   \Drupal::service('module_installer')->install(['basic_auth']);
   $changes = icms_mcp_configure_mcp_endpoint();
   $summary = $changes
     ? 'MCP endpoint configured: ' . implode('; ', $changes) . '.'
     : 'MCP endpoint already in the enforced state.';
   return $summary . ' Export config (drush cex) so the next config import keeps it.';
+}
+
+/**
+ * Switch to mcp_server + OAuth 2.1: keys, scope, consumer, permissions.
+ */
+function icms_mcp_update_10104(): string {
+  \Drupal::service('module_installer')->install(['mcp_server', 'simple_oauth', 'consumers']);
+  icms_mcp_ensure_service_account();
+  $credentials = icms_mcp_ensure_oauth_client();
+  if ($credentials !== NULL) {
+    return 'Created the ICMS MCP OAuth client — client_id ' . $credentials['client_id']
+      . ', client_secret ' . $credentials['client_secret']
+      . ' — shown only this once: paste both into the cockpit connection form.'
+      . ' Rotate with drush icms-mcp:rotate-secret. Export config (drush cex).';
+  }
+  return 'OAuth client ensured; the consumer already existed (secret untouched).';
 }

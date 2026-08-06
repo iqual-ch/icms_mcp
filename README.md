@@ -105,35 +105,56 @@ import attempt.
 
 ## Install
 
-Requires `drupal/mcp ^1.0`.
+The full stack (drupal/mcp_server, simple_oauth, consumers) is pulled in
+transitively — nothing else to require on the target project.
 
 ```bash
 ddev composer require 'iqual/icms_mcp'
-ddev drush en icms_mcp -y
+ddev drush en icms_mcp -y     # prints the OAuth client credentials ONCE
+ddev drush cex -y             # consumer, scope, and role are config
 ```
 
-## Configure
+## Authentication — OAuth 2.1 client_credentials
 
-1. The MCP endpoint is configured for you: install (and `drush updb`,
-   update 10103) turns endpoint authentication ON with basic auth allowed
-   (the service account's scheme; token settings are preserved), enables
-   the `icms-mcp` plugin (hyphen, not underscore — see "Plugin ID gotcha"
-   above), and writes an explicit `enabled: false` for every other MCP
-   plugin the site hasn't deliberately configured. That last part matters
-   twice over: unconfigured plugins count as *enabled* in `drupal/mcp`,
-   which exposes DrushCaller (drush over HTTP to anyone with `use mcp
-   server`) and makes `tools/list` shell out to drush (~70s — past any MCP
-   client timeout). Plugins you configured explicitly are left alone. The
-   `basic_auth` core module is a dependency and is installed automatically.
-2. The service account is created for you: install adds an `icms_mcp` role
-   (only `Use MCP server` + `Use ICMS MCP tools`, nothing else) and an
-   active `icms_mcp` user with a generated password **printed exactly once**
-   in the install/updb output. Rotate it any time with
-   `ddev drush upwd icms_mcp '<new password>'`. Uninstall deletes both —
-   no standing credential outside the migration window.
-3. The role and `mcp.settings` are config: run `ddev drush cex` after
-   install, or the next config import deletes the role (the user would
-   survive but lose its grants) and reverts the endpoint hardening.
+Everything is provisioned on install (and on `drush updb`, update 10104):
+
+1. **Signing keys** generated outside the webroot (`../keys/`, never in
+   git) and wired into `simple_oauth.settings` — skipped when the site
+   already has keys.
+2. An **`icms_mcp` OAuth scope** with ROLE granularity: access tokens carry
+   exactly the `icms_mcp` role's permissions (`access mcp server`,
+   `use icms_mcp tools`), nothing more.
+3. A **confidential consumer** (`client_id: icms_mcp`, client_credentials
+   grant, 1h tokens) bound to a **passwordless** `icms_mcp` service user —
+   nothing can log in as it; only tokens act through it.
+4. The `client_id` + `client_secret` are printed **exactly once** — paste
+   them into the cockpit connection form. Rotate any time:
+   `ddev drush icms-mcp:rotate-secret`. Uninstall deletes consumer, scope,
+   user, and role — no standing credential outside the migration window.
+
+Token flow (what the agent does for you):
+
+```bash
+curl -X POST https://<site>/oauth/token \
+  -d 'grant_type=client_credentials&client_id=icms_mcp&client_secret=<secret>&scope=icms_mcp'
+# → {access_token, expires_in: 3600}
+curl -X POST https://<site>/mcp -H 'Authorization: Bearer <access_token>' ...
+```
+
+**Router note (ICMS/Varnish):** the path whitelist that passes requests to
+Drupal must include `/mcp` AND `/oauth` — otherwise token requests land in
+the Nuxt frontend as 404s.
+
+The module ships a route subscriber that allows the `oauth2` authentication
+provider on `/mcp` (mcp_server's route declares `_auth: ['cookie']`, and an
+explicit `_auth` list excludes even global providers).
+
+## Legacy drupal/mcp endpoint (transition only)
+
+`src/Plugin/Mcp/IcmsMcp.php` keeps the old `/mcp/post` + basic-auth
+endpoint working on sites that still have `drupal/mcp` enabled. It shares
+the same operations service. It is removed together with the
+`drupal/mcp` composer requirement once the fleet has moved.
 
 ## Why a plugin and not a custom REST/JSON:API endpoint?
 

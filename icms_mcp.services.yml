@@ -9,6 +9,25 @@ services:
       - '@module_handler'
       - '@extension.list.module'
 
+  icms_mcp.operations:
+    class: Drupal\icms_mcp\Service\IcmsMcpOperations
+    arguments:
+      - '@entity_type.manager'
+      - '@entity_type.bundle.info'
+      - '@entity_field.manager'
+      - '@database'
+      - '@state'
+      - '@logger.channel.icms_mcp'
+      - '@datetime.time'
+      - '@http_client'
+      - '@file_system'
+      - '@icms_mcp.catalog_builder'
+
+  icms_mcp.mcp_server_auth_route_subscriber:
+    class: Drupal\icms_mcp\Routing\McpServerAuthRouteSubscriber
+    tags:
+      - { name: event_subscriber }
+
   logger.channel.icms_mcp:
     parent: logger.channel_base
     arguments: ['icms_mcp']

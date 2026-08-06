@@ -92,20 +92,17 @@ function icms_mcp_node_type_insert(NodeTypeInterface $node_type): void {
 }
 
 /**
- * Ensure the MCP service role and user exist with exactly the MCP grants.
+ * Ensure the MCP service role and passwordless user exist with the grants.
  *
- * The agent authenticates as a dedicated user carrying only `use mcp server`
- * (drupal/mcp) and `use icms_mcp tools` (this module) — the module owns that
- * account's lifecycle so per-site setup is just enabling the module during
- * the migration window. The role is a config entity: run `drush cex` after
+ * OAuth 2.1 access tokens (client_credentials, see
+ * icms_mcp_ensure_oauth_client()) act as this user; the token's permission
+ * ceiling is the role via the icms_mcp scope. The module owns the account's
+ * lifecycle so per-site setup is just enabling the module during the
+ * migration window. The role is a config entity: run `drush cex` after
  * install or the next config import deletes it (the user survives — users
  * are content — but loses its grants with the role).
- *
- * @return string|null
- *   The generated password when the user was newly created (shown exactly
- *   once — rotate any time with `drush upwd icms_mcp`), NULL otherwise.
  */
-function icms_mcp_ensure_service_account(): ?string {
+function icms_mcp_ensure_service_account(): void {
   $role = Role::load(ICMS_MCP_SERVICE_ACCOUNT);
   if ($role === NULL) {
     $role = Role::create([
@@ -113,7 +110,10 @@ function icms_mcp_ensure_service_account(): ?string {
       'label' => 'ICMS MCP',
     ]);
   }
-  foreach (['use mcp server', 'use icms_mcp tools'] as $permission) {
+  // `access mcp server` gates the mcp_server endpoint (primary transport);
+  // `use mcp server` keeps the legacy drupal/mcp endpoint working during
+  // the transition window; `use icms_mcp tools` is this module's own gate.
+  foreach (['access mcp server', 'use mcp server', 'use icms_mcp tools'] as $permission) {
     $role->grantPermission($permission);
   }
   $role->save();
@@ -127,20 +127,19 @@ function icms_mcp_ensure_service_account(): ?string {
       $user->addRole(ICMS_MCP_SERVICE_ACCOUNT);
       $user->save();
     }
-    return NULL;
+    return;
   }
 
-  $password = \Drupal::service('password_generator')->generate(24);
+  // No password: the account exists only as the identity OAuth tokens map
+  // to. Nothing can log in as it.
   User::create([
     'name' => ICMS_MCP_SERVICE_ACCOUNT,
     'status' => 1,
     'roles' => [ICMS_MCP_SERVICE_ACCOUNT],
-    'pass' => $password,
   ])->save();
   \Drupal::logger('icms_mcp')->notice('Created the @name service user and role. Export config (drush cex) so the next config import keeps the role.', [
     '@name' => ICMS_MCP_SERVICE_ACCOUNT,
   ]);
-  return $password;
 }
 
 /**
@@ -217,13 +216,118 @@ function icms_mcp_release_mcp_endpoint(): void {
 }
 
 /**
- * Remove the MCP service user and role this module created.
+ * Remove the MCP service user, role, OAuth consumer and scope on uninstall.
+ *
+ * The module is enabled per site only during its migration window; removing
+ * it must leave no standing credential behind. The simple_oauth key pair is
+ * left in place — other consumers may rely on it.
  */
 function icms_mcp_remove_service_account(): void {
-  $users = \Drupal::entityTypeManager()->getStorage('user')
+  $etm = \Drupal::entityTypeManager();
+  if ($etm->hasDefinition('consumer')) {
+    foreach ($etm->getStorage('consumer')->loadByProperties(['client_id' => ICMS_MCP_SERVICE_ACCOUNT]) as $consumer) {
+      $consumer->delete();
+    }
+  }
+  if ($etm->hasDefinition('oauth2_scope')) {
+    $etm->getStorage('oauth2_scope')->load(ICMS_MCP_SERVICE_ACCOUNT)?->delete();
+  }
+  $users = $etm->getStorage('user')
     ->loadByProperties(['name' => ICMS_MCP_SERVICE_ACCOUNT]);
   foreach ($users as $user) {
     $user->delete();
   }
   Role::load(ICMS_MCP_SERVICE_ACCOUNT)?->delete();
+}
+
+/**
+ * Provision the OAuth 2.1 client_credentials client for the MCP tools.
+ *
+ * Owns the full chain so per-site setup stays "enable the module":
+ *   - simple_oauth key pair, generated OUTSIDE the webroot (never in git);
+ *   - an `icms_mcp` oauth2 scope with ROLE granularity — tokens carry
+ *     exactly the icms_mcp role's permissions, nothing more;
+ *   - a confidential Consumer (client_credentials grant) bound to the
+ *     icms_mcp service user, access tokens valid 1h.
+ *
+ * @return array{client_id: string, client_secret: string}|null
+ *   The credentials when the consumer was newly created — shown exactly
+ *   once, paste them into the cockpit connection form. NULL when the
+ *   consumer already existed (secret untouched; rotate with
+ *   `drush icms-mcp:rotate-secret`).
+ */
+function icms_mcp_ensure_oauth_client(): ?array {
+  $etm = \Drupal::entityTypeManager();
+
+  // 1. Signing keys. Outside the webroot, sibling of the docroot.
+  $settings = \Drupal::configFactory()->getEditable('simple_oauth.settings');
+  $public = (string) $settings->get('public_key');
+  $private = (string) $settings->get('private_key');
+  if ($public === '' || $private === '' || !is_file($public) || !is_file($private)) {
+    $dir = dirname(DRUPAL_ROOT) . '/keys';
+    if (!is_dir($dir)) {
+      mkdir($dir, 0750, TRUE);
+    }
+    if (!is_file($dir . '/public.key') || !is_file($dir . '/private.key')) {
+      \Drupal::service('simple_oauth.key.generator')->generateKeys($dir);
+    }
+    $settings
+      ->set('public_key', $dir . '/public.key')
+      ->set('private_key', $dir . '/private.key')
+      ->save();
+  }
+
+  // 2. Scope: role granularity — the token's permission ceiling is the role.
+  $scope_storage = $etm->getStorage('oauth2_scope');
+  if ($scope_storage->load(ICMS_MCP_SERVICE_ACCOUNT) === NULL) {
+    $scope_storage->create([
+      'id' => ICMS_MCP_SERVICE_ACCOUNT,
+      'name' => ICMS_MCP_SERVICE_ACCOUNT,
+      'description' => 'ICMS MCP migration tools',
+      'grant_types' => ['client_credentials' => ['status' => TRUE]],
+      'umbrella' => FALSE,
+      'granularity_id' => 'role',
+      'granularity_configuration' => ['role' => ICMS_MCP_SERVICE_ACCOUNT],
+    ])->save();
+  }
+
+  // 3. Consumer. Existing consumer keeps its secret.
+  $consumer_storage = $etm->getStorage('consumer');
+  if ($consumer_storage->loadByProperties(['client_id' => ICMS_MCP_SERVICE_ACCOUNT])) {
+    return NULL;
+  }
+  $users = $etm->getStorage('user')->loadByProperties(['name' => ICMS_MCP_SERVICE_ACCOUNT]);
+  $user = reset($users);
+  $secret = \Drupal::service('password_generator')->generate(32);
+  $consumer_storage->create([
+    'label' => 'ICMS MCP',
+    'client_id' => ICMS_MCP_SERVICE_ACCOUNT,
+    'secret' => $secret,
+    'confidential' => TRUE,
+    'grant_types' => [['value' => 'client_credentials']],
+    'user_id' => $user ? $user->id() : NULL,
+    'scopes' => [['scope_id' => ICMS_MCP_SERVICE_ACCOUNT]],
+    'access_token_expiration' => 3600,
+    'is_default' => FALSE,
+  ])->save();
+  \Drupal::logger('icms_mcp')->notice('Created the @id OAuth consumer (client_credentials). Export config (drush cex) so the consumer, scope, and role survive the next config import.', [
+    '@id' => ICMS_MCP_SERVICE_ACCOUNT,
+  ]);
+  return ['client_id' => ICMS_MCP_SERVICE_ACCOUNT, 'client_secret' => $secret];
+}
+
+/**
+ * Rotate the OAuth consumer secret; returns the new secret (shown once).
+ */
+function icms_mcp_rotate_oauth_secret(): string {
+  $consumers = \Drupal::entityTypeManager()->getStorage('consumer')
+    ->loadByProperties(['client_id' => ICMS_MCP_SERVICE_ACCOUNT]);
+  $consumer = reset($consumers);
+  if (!$consumer) {
+    throw new \RuntimeException('No ' . ICMS_MCP_SERVICE_ACCOUNT . ' consumer exists — run the module updates (drush updb) first.');
+  }
+  $secret = \Drupal::service('password_generator')->generate(32);
+  $consumer->set('secret', $secret);
+  $consumer->save();
+  return $secret;
 }

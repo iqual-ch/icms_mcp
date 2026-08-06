@@ -1,0 +1,75 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Drupal\icms_mcp\Plugin\Tool;
+
+use Drupal\icms_mcp\Service\IcmsMcpOperations;
+use Drupal\Core\Session\AccountProxyInterface;
+use Drupal\Core\StringTranslation\TranslatableMarkup;
+use Drupal\mcp_server\Attribute\Tool;
+use Drupal\mcp_server\Plugin\ToolPluginBase;
+use Mcp\Server\ClientGateway;
+use Symfony\Component\DependencyInjection\ContainerInterface;
+
+/**
+ * MCP tool: get_icms_component_contract — thin adapter over IcmsMcpOperations.
+ */
+#[Tool(
+  id: 'get_icms_component_contract',
+  label: new TranslatableMarkup('Get ICMS component contract'),
+  description: new TranslatableMarkup('Resolve full live contracts for selected node, paragraph, or media bundles. Optionally includes nested paragraph child bundles.'),
+  inputSchema: [
+    'type' => 'object',
+    'properties' => [
+      'entity_type' => ['type' => 'string', 'enum' => ['node', 'paragraph', 'media']],
+      'bundles' => ['type' => 'array', 'items' => ['type' => 'string'], 'maxItems' => 25],
+      'include_children' => ['type' => 'boolean', 'default' => TRUE],
+    ],
+    'required' => ['entity_type', 'bundles'],
+  ],
+  readOnly: TRUE,
+  destructive: FALSE,
+  idempotent: TRUE,
+  openWorld: FALSE,
+)]
+final class GetIcmsComponentContract extends ToolPluginBase {
+
+  protected IcmsMcpOperations $operations;
+
+  /**
+   * {@inheritdoc}
+   */
+  public static function create(
+    ContainerInterface $container,
+    array $configuration,
+    $plugin_id,
+    $plugin_definition,
+  ): static {
+    $instance = new static(
+      $configuration,
+      $plugin_id,
+      $plugin_definition,
+      $container->get('current_user'),
+    );
+    $instance->operations = $container->get('icms_mcp.operations');
+    return $instance;
+  }
+
+  /**
+   * {@inheritdoc}
+   *
+   * Enabled by default: the module exists solely to expose these tools.
+   */
+  protected function defaultConfiguration(): array {
+    return ['enabled' => TRUE];
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function execute(array $arguments, ClientGateway $gateway): mixed {
+    return $this->operations->execute('get_icms_component_contract', $arguments);
+  }
+
+}
