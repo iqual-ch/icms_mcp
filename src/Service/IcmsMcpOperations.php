@@ -13,6 +13,7 @@ use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\File\FileExists;
 use Drupal\Core\File\FileSystemInterface;
+use Drupal\Core\Lock\LockBackendInterface;
 use Drupal\Core\State\StateInterface;
 use GuzzleHttp\ClientInterface;
 use Psr\Log\LoggerInterface;
@@ -43,6 +44,13 @@ final class IcmsMcpOperations {
    */
   protected const DEFAULT_LAYOUTS_FIELD = 'field_icms_paragraphs';
 
+  /**
+   * Seconds a per-page import lock is held (a large page with many
+   * paragraphs and translations takes a few seconds; this is the ceiling
+   * before the lock is considered stale).
+   */
+  protected const IMPORT_LOCK_TIMEOUT = 120.0;
+
   public function __construct(
     protected EntityTypeManagerInterface $entityTypeManager,
     protected EntityTypeBundleInfoInterface $bundleInfo,
@@ -54,6 +62,7 @@ final class IcmsMcpOperations {
     protected ClientInterface $httpClient,
     protected FileSystemInterface $fileSystem,
     protected IcmsCatalogBuilder $catalogBuilder,
+    protected LockBackendInterface $lock,
   ) {}
 
   /**
@@ -286,9 +295,6 @@ final class IcmsMcpOperations {
     }
 
     $metadata = $pivot['metadata'] ?? [];
-    $import = $pivot['drupal_import'] ?? [];
-    $node_attrs = $import['node']['attributes'] ?? [];
-    $paragraphs = $import['paragraphs'] ?? [];
     $idempotence_key = (string) ($metadata['idempotence_key'] ?? '');
     $strategy = (string) ($metadata['strategy'] ?? 'skip-or-update');
     $review_decision = (string) ($metadata['review_decision'] ?? 'auto_approve');
@@ -322,6 +328,64 @@ final class IcmsMcpOperations {
     //    duplicate.
     $source_field = $this->sourceKeyFieldName();
     $source_url = $this->extractSourceUrl($idempotence_key);
+
+    // Serialize per source page. The lookup below and the write that follows
+    // are a check-then-act, and each request commits in its own transaction,
+    // so two overlapping imports of the SAME page both see "nothing there"
+    // and both create a node. That is not hypothetical: one migration run
+    // whose import tool was invoked twice in parallel left 17 duplicate
+    // nodes on the target. The lock makes the decision atomic no matter how
+    // many clients (or retried tool calls) arrive at once.
+    $lock_name = 'icms_mcp:import:' . hash('sha256', $source_url !== '' ? $source_url : $idempotence_key);
+    $have_lock = $this->lock->acquire($lock_name, self::IMPORT_LOCK_TIMEOUT);
+    if (!$have_lock) {
+      // Someone else is importing this page: wait for them, then re-try once.
+      // If it still is not free we continue anyway — by then the holder has
+      // almost certainly committed, so our lookup sees their node and we
+      // update it instead of creating a twin.
+      $this->lock->wait($lock_name, (int) self::IMPORT_LOCK_TIMEOUT);
+      $have_lock = $this->lock->acquire($lock_name, self::IMPORT_LOCK_TIMEOUT);
+    }
+    try {
+      return $this->importPivotWithLock(
+        $pivot,
+        $dry_run,
+        $node_bundle,
+        $source_field,
+        $source_url,
+        $idempotence_key,
+        $strategy,
+        $batch_id,
+        $run_id,
+      );
+    }
+    finally {
+      if ($have_lock) {
+        $this->lock->release($lock_name);
+      }
+    }
+  }
+
+  /**
+   * The import decision + write, executed while holding the per-page lock.
+   *
+   * Split out of doImportPivot() only so the lock has a single release point;
+   * never call it directly.
+   */
+  protected function importPivotWithLock(
+    array $pivot,
+    bool $dry_run,
+    string $node_bundle,
+    string $source_field,
+    string $source_url,
+    string $idempotence_key,
+    string $strategy,
+    string $batch_id,
+    string $run_id,
+  ): array {
+    $import = $pivot['drupal_import'] ?? [];
+    $node_attrs = $import['node']['attributes'] ?? [];
+    $paragraphs = $import['paragraphs'] ?? [];
     $existing_nid = $this->findNodeBySourceUrl($node_bundle, $source_field, $source_url);
 
     // The idempotency lookup is bundle-scoped, so a page re-imported under a
