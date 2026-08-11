@@ -8,6 +8,7 @@ services:
       - '@config.factory'
       - '@module_handler'
       - '@extension.list.module'
+      - '@language_manager'
 
   icms_mcp.operations:
     class: Drupal\icms_mcp\Service\IcmsMcpOperations

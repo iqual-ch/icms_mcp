@@ -11,6 +11,7 @@ use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Extension\ModuleExtensionList;
 use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
+use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\field\FieldStorageConfigInterface;
 use Symfony\Component\Yaml\Yaml;
 
@@ -26,7 +27,38 @@ final class IcmsCatalogBuilder {
     private readonly ConfigFactoryInterface $configFactory,
     private readonly ModuleHandlerInterface $moduleHandler,
     private readonly ModuleExtensionList $moduleExtensionList,
+    private readonly LanguageManagerInterface $languageManager,
   ) {}
+
+  /**
+   * Languages enabled on this target, and the default one.
+   *
+   * A migration's source languages have to exist here before translations can
+   * land; without this the "enable these languages" checklist item has no
+   * closing test.
+   */
+  private function languages(): array {
+    $enabled = array_keys($this->languageManager->getLanguages());
+    sort($enabled);
+    return [
+      'enabled' => array_values($enabled),
+      'default' => $this->languageManager->getDefaultLanguage()->getId(),
+    ];
+  }
+
+  /**
+   * Whether content translation is enabled for a bundle.
+   *
+   * Read from config rather than the content_translation API so the catalog
+   * still builds on a site without that module installed. A translatable field
+   * on a bundle that has translation switched off never gets translated.
+   */
+  private function contentTranslationEnabled(string $entityType, string $bundle): bool {
+    $settings = $this->configFactory
+      ->get('language.content_settings.' . $entityType . '.' . $bundle)
+      ->get('third_party_settings');
+    return (bool) ($settings['content_translation']['enabled'] ?? FALSE);
+  }
 
   /** Return the compact, normalized catalog manifest. */
   public function buildManifest(string $sourceField, string $layoutsField): array {
@@ -54,6 +86,7 @@ final class IcmsCatalogBuilder {
           'description' => (string) ($editorial['summary'] ?? ''),
           'fieldRefs' => array_map(fn(string $name): string => $entityType . '.' . $name, array_keys($fields)),
           'capabilities' => $this->capabilities($fields, $editorial),
+          'contentTranslationEnabled' => $this->contentTranslationEnabled($entityType, $bundle),
         ];
         if ($entityType === 'paragraph') {
           $entry['role'] = (string) ($editorial['role'] ?? 'component');
@@ -98,8 +131,12 @@ final class IcmsCatalogBuilder {
 
     $manifest = [
       'status' => 'ok',
-      'format' => 'icms-target-catalog-v2',
+      // v3 adds `languages`, per-bundle `contentTranslationEnabled` and a
+      // `translatable` flag on each field, so the translation checklist items
+      // become verifiable instead of advisory. Readers tolerate v2.
+      'format' => 'icms-target-catalog-v3',
       'site' => ['sourceKeyField' => $sourceField, 'layoutsField' => $layoutsField],
+      'languages' => $this->languages(),
       'vocabularies' => $vocabularies,
       'fieldDefinitions' => $fieldDefinitions,
       'optionDefinitions' => $options,
@@ -187,6 +224,10 @@ final class IcmsCatalogBuilder {
     $data = $this->storageDefinition($definition) + [
       'label' => (string) $definition->getLabel(),
       'required' => $definition->isRequired(),
+      // The symmetric translation model needs the fields INSIDE the paragraph
+      // types translatable, or a matched language still degrades to node scalar
+      // fields. Without this flag that checklist item has no closing test.
+      'translatable' => $definition->isTranslatable(),
     ];
     $handler = $definition->getSetting('handler_settings') ?? [];
     $targets = array_keys($handler['target_bundles'] ?? []);
