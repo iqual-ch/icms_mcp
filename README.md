@@ -118,9 +118,11 @@ ddev drush cex -y             # consumer, scope, and role are config
 
 Everything is provisioned on install (and on `drush updb`, update 10104):
 
-1. **Signing keys** generated outside the webroot (`../keys/`, never in
-   git) and wired into `simple_oauth.settings` — skipped when the site
-   already has keys.
+1. **Signing keys** generated under `private://simple_oauth/` and wired into
+   `simple_oauth.settings` as a stream URI — the private file system is never
+   served and never in git, and the exported setting is valid in every
+   environment (DDEV, Upsun mount, production). Skipped when the site already
+   has keys. Install is refused when no `file_private_path` is configured.
 2. An **`icms_mcp` OAuth scope** with ROLE granularity: access tokens carry
    exactly the `icms_mcp` role's permissions (`access mcp server`,
    `use icms_mcp tools`), nothing more.
@@ -162,3 +164,18 @@ Reuse + provenance. Every MCP-enabled client (Claude Desktop / Cursor / the
 ADK `McpToolset`) discovers the tools automatically, the auth + RBAC layer
 comes from `drupal/mcp`, and we get the streamable-HTTP transport, schema
 validation, and permission gating for free.
+
+## Moving keys that were generated inside the project
+
+Earlier versions generated the pair at `<project>/keys/`, inside the
+repository. If a site still has them there (`ddev drush cget simple_oauth.settings`),
+regenerate into the private file system — anything signed with the old pair
+stops validating, which is the point if they were ever committed:
+
+```bash
+ddev drush simple-oauth:generate-keys private://simple_oauth
+ddev drush cset simple_oauth.settings public_key private://simple_oauth/public.key -y
+ddev drush cset simple_oauth.settings private_key private://simple_oauth/private.key -y
+ddev drush cex -y
+rm -rf drupal/keys   # and purge them from git history if they were pushed
+```
