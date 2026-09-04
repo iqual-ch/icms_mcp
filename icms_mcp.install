@@ -32,6 +32,9 @@ function icms_mcp_requirements(string $phase): array {
  * Implements hook_install().
  */
 function icms_mcp_install(): void {
+  // Drush command classes are autoloaded, but the .module helpers below are
+  // not guaranteed to be included yet in every CLI bootstrap — load explicitly.
+  \Drupal::moduleHandler()->load('icms_mcp');
   icms_mcp_ensure_source_key_field();
   icms_mcp_ensure_service_account();
   // Legacy drupal/mcp endpoint hardening — transition only, skipped once
@@ -99,6 +102,9 @@ function icms_mcp_update_10103(): string {
  */
 function icms_mcp_update_10104(): string {
   \Drupal::service('module_installer')->install(['mcp_server', 'simple_oauth', 'consumers']);
+  // Drush command classes are autoloaded, but the .module helpers below are
+  // not guaranteed to be included yet in every CLI bootstrap — load explicitly.
+  \Drupal::moduleHandler()->load('icms_mcp');
   icms_mcp_ensure_service_account();
   $credentials = icms_mcp_ensure_oauth_client();
   if ($credentials !== NULL) {

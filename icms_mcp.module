@@ -335,19 +335,3 @@ function icms_mcp_ensure_oauth_client(): ?array {
   ]);
   return ['client_id' => ICMS_MCP_SERVICE_ACCOUNT, 'client_secret' => $secret];
 }
-
-/**
- * Rotate the OAuth consumer secret; returns the new secret (shown once).
- */
-function icms_mcp_rotate_oauth_secret(): string {
-  $consumers = \Drupal::entityTypeManager()->getStorage('consumer')
-    ->loadByProperties(['client_id' => ICMS_MCP_SERVICE_ACCOUNT]);
-  $consumer = reset($consumers);
-  if (!$consumer) {
-    throw new \RuntimeException('No ' . ICMS_MCP_SERVICE_ACCOUNT . ' consumer exists — run the module updates (drush updb) first.');
-  }
-  $secret = \Drupal::service('password_generator')->generate(32);
-  $consumer->set('secret', $secret);
-  $consumer->save();
-  return $secret;
-}
