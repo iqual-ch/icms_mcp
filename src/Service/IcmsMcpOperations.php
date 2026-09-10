@@ -99,6 +99,12 @@ final class IcmsMcpOperations {
           is_array($arguments['terms'] ?? NULL) ? $arguments['terms'] : [],
         );
       }
+      if ($toolId === 'import_users' || $toolId === md5('import_users')) {
+        return $this->doImportUsers(
+          is_array($arguments['users'] ?? NULL) ? $arguments['users'] : [],
+          is_array($arguments['role_mapping'] ?? NULL) ? $arguments['role_mapping'] : [],
+        );
+      }
       if ($toolId === 'import_menu_links' || $toolId === md5('import_menu_links')) {
         return $this->doImportMenuLinks(
           (string) ($arguments['menu'] ?? ''),
@@ -191,6 +197,16 @@ final class IcmsMcpOperations {
       $node_defs = $this->fieldManager->getFieldDefinitions('node', $node_bundle);
       foreach ($node_attrs as $name => $value) {
         if ($name === 'title' || $name === 'langcode' || $name === 'status' || $name === 'body') {
+          continue;
+        }
+        // `owner` names a PERSON, not a field: it resolves to the node's uid
+        // by e-mail. Validating it against the bundle's field list rejected
+        // every node that carried one ("Field 'owner' does not exist on
+        // node:icms_event").
+        if ($name === 'owner') {
+          if (!is_array($value) || (trim((string) ($value['email'] ?? '')) === '' && trim((string) ($value['name'] ?? '')) === '')) {
+            $issues[] = ['path' => '/drupal_import/node/attributes/owner', 'code' => 'invalid_owner', 'message' => 'owner must be an object with an email or a name.'];
+          }
           continue;
         }
         if (!isset($node_defs[$name])) {
@@ -690,6 +706,173 @@ final class IcmsMcpOperations {
       'term_count' => count($results),
       'terms' => $results,
     ];
+  }
+
+  /**
+   * Upsert the source's accounts so imported nodes can be owned by a person.
+   *
+   * Matched by e-mail: it is the only identifier that survives a migration —
+   * uids are per-site and usernames collide. An account with no e-mail cannot
+   * be matched and is reported rather than guessed at; its pages stay with the
+   * importing account.
+   *
+   * Accounts are created BLOCKED and without a password: this imports
+   * authorship, not access. Anyone who should be able to log in is unblocked
+   * deliberately, by a human. No notification mail is ever sent — a migration
+   * must not e-mail a customer's editors.
+   *
+   * @param array $users
+   *   Source accounts: {uid, uuid, name, mail, status, roles, created}.
+   * @param array $role_mapping
+   *   Source role id → target role id, as confirmed at the migration's role
+   *   gate. A source role absent from the mapping, or mapped to a role this
+   *   site does not have, is reported as `pending_target_setup`.
+   */
+  protected function doImportUsers(array $users, array $role_mapping): array {
+    if (!$this->entityTypeManager->hasDefinition('user')) {
+      return ['status' => 'error', 'reason' => 'the user entity type is not available on this site.'];
+    }
+    $user_storage = $this->entityTypeManager->getStorage('user');
+
+    $existing_roles = [];
+    if ($this->entityTypeManager->hasDefinition('user_role')) {
+      $existing_roles = array_keys($this->entityTypeManager->getStorage('user_role')->loadMultiple());
+    }
+
+    $results = [];
+    $pending_roles = [];
+    $by_source_uid = [];
+    foreach ($users as $spec) {
+      if (!is_array($spec)) {
+        continue;
+      }
+      $mail = trim((string) ($spec['mail'] ?? ''));
+      $name = trim((string) ($spec['name'] ?? ''));
+      $source_uid = (int) ($spec['uid'] ?? 0);
+      if ($mail === '') {
+        $results[] = [
+          'uid' => $source_uid,
+          'name' => $name,
+          'action' => 'skipped',
+          'reason' => 'owner_email_missing',
+        ];
+        continue;
+      }
+
+      // Roles first: an unmapped role is reported, never invented.
+      $target_roles = [];
+      foreach ((array) ($spec['roles'] ?? []) as $source_role) {
+        $source_role = (string) $source_role;
+        if ($source_role === '' || $source_role === 'authenticated') {
+          continue;
+        }
+        $mapped = (string) ($role_mapping[$source_role] ?? '');
+        if ($mapped === '' || !in_array($mapped, $existing_roles, TRUE)) {
+          $pending_roles[$source_role] = TRUE;
+          continue;
+        }
+        $target_roles[] = $mapped;
+      }
+
+      $matches = $user_storage->loadByProperties(['mail' => $mail]);
+      $account = $matches ? reset($matches) : NULL;
+
+      if ($account === NULL) {
+        $values = [
+          'name' => $this->availableUserName($name !== '' ? $name : $mail, $user_storage),
+          'mail' => $mail,
+          'status' => 0,
+        ];
+        if ((int) ($spec['created'] ?? 0) > 0) {
+          $values['created'] = (int) $spec['created'];
+        }
+        if (!empty($spec['uuid'])) {
+          $values['uuid'] = (string) $spec['uuid'];
+        }
+        $account = $user_storage->create($values);
+        $action = 'created';
+      }
+      else {
+        // An account that already exists on the target is the customer's, not
+        // the migration's: never rename it and never change whether it can log
+        // in. Only the roles this migration is responsible for are added.
+        $action = 'matched';
+      }
+      foreach ($target_roles as $role_id) {
+        if (!$account->hasRole($role_id)) {
+          $account->addRole($role_id);
+        }
+      }
+      $account->save();
+
+      $by_source_uid[$source_uid] = (int) $account->id();
+      $results[] = [
+        'uid' => $source_uid,
+        'targetUid' => (int) $account->id(),
+        'name' => $account->getAccountName(),
+        'mail' => $mail,
+        'roles' => $target_roles,
+        'action' => $action,
+      ];
+    }
+
+    $created = 0;
+    $skipped = 0;
+    foreach ($results as $row) {
+      if ($row['action'] === 'created') {
+        $created++;
+      }
+      elseif ($row['action'] === 'skipped') {
+        $skipped++;
+      }
+    }
+    return [
+      'status' => 'ok',
+      'user_count' => count($results),
+      'created_count' => $created,
+      'matched_count' => count($results) - $created - $skipped,
+      'skipped_count' => $skipped,
+      'pending_target_setup' => array_keys($pending_roles),
+      'source_uid_map' => $by_source_uid,
+      'users' => $results,
+    ];
+  }
+
+  /**
+   * The target uid for a `{email, name}` owner, or NULL to leave it alone.
+   *
+   * By e-mail only. A name is not an identity — two people share one, and
+   * matching on it would hand a customer's pages to the wrong account. When an
+   * owner cannot be resolved the node keeps the importing account, which is
+   * the honest outcome: authorship missing, not authorship wrong.
+   */
+  protected function resolveOwnerUid(array $owner): ?int {
+    $mail = trim((string) ($owner['email'] ?? $owner['mail'] ?? ''));
+    if ($mail === '' || !$this->entityTypeManager->hasDefinition('user')) {
+      return NULL;
+    }
+    $matches = $this->entityTypeManager->getStorage('user')->loadByProperties(['mail' => $mail]);
+    if (!$matches) {
+      return NULL;
+    }
+    return (int) reset($matches)->id();
+  }
+
+  /**
+   * A username nobody else holds — the source's, suffixed only when taken.
+   *
+   * Usernames are unique per site and two sites can disagree; the e-mail is
+   * what identifies the person, so a collision must not stop the import.
+   */
+  protected function availableUserName(string $preferred, $user_storage): string {
+    $preferred = trim($preferred) !== '' ? trim($preferred) : 'imported-user';
+    $candidate = $preferred;
+    $suffix = 1;
+    while ($user_storage->loadByProperties(['name' => $candidate])) {
+      $suffix++;
+      $candidate = $preferred . '-' . $suffix;
+    }
+    return $candidate;
   }
 
   /**
@@ -1799,8 +1982,14 @@ final class IcmsMcpOperations {
         $node->set('body', $body + ['format' => 'basic_html']);
       }
     }
+    if (isset($attrs['owner']) && is_array($attrs['owner'])) {
+      $uid = $this->resolveOwnerUid($attrs['owner']);
+      if ($uid !== NULL) {
+        $node->setOwnerId($uid);
+      }
+    }
     foreach ($attrs as $name => $value) {
-      if (in_array($name, ['title', 'body', 'langcode', 'status'], TRUE)) {
+      if (in_array($name, ['title', 'body', 'langcode', 'status', 'owner'], TRUE)) {
         continue;
       }
       if ($node->hasField($name)) {

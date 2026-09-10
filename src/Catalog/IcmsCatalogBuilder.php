@@ -47,6 +47,28 @@ final class IcmsCatalogBuilder {
   }
 
   /**
+   * The roles a migrated account can be given on this site.
+   *
+   * The migration's role gate maps each SOURCE role onto one of these, so the
+   * gate needs the list before any user is imported. `anonymous` and
+   * `authenticated` are omitted: they are implicit on every account and never
+   * a mapping decision.
+   */
+  private function roles(): array {
+    if (!$this->entityTypeManager->hasDefinition('user_role')) {
+      return [];
+    }
+    $roles = [];
+    foreach ($this->entityTypeManager->getStorage('user_role')->loadMultiple() as $role) {
+      if (in_array($role->id(), ['anonymous', 'authenticated'], TRUE)) {
+        continue;
+      }
+      $roles[] = ['id' => $role->id(), 'label' => (string) $role->label()];
+    }
+    return $roles;
+  }
+
+  /**
    * Whether content translation is enabled for a bundle.
    *
    * Read from config rather than the content_translation API so the catalog
@@ -137,6 +159,7 @@ final class IcmsCatalogBuilder {
       'format' => 'icms-target-catalog-v3',
       'site' => ['sourceKeyField' => $sourceField, 'layoutsField' => $layoutsField],
       'languages' => $this->languages(),
+      'roles' => $this->roles(),
       'vocabularies' => $vocabularies,
       'fieldDefinitions' => $fieldDefinitions,
       'optionDefinitions' => $options,

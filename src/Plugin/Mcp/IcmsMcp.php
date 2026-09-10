@@ -139,6 +139,24 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         ],
       ),
       new Tool(
+        name: 'import_users',
+        description: 'Upsert the source site\'s accounts so imported nodes can be owned by a person (idempotent by e-mail). New accounts are created BLOCKED and without a password - this imports authorship, not access - and no notification mail is sent. An existing account is matched, never renamed or unblocked; only mapped roles are added. Users import BEFORE nodes. Returns per-user {targetUid, action} plus pending_target_setup for source roles with no target.',
+        inputSchema: [
+          'type' => 'object',
+          'properties' => [
+            'users' => [
+              'type' => 'array',
+              'description' => 'Source accounts: {uid, uuid?, name, mail, status?, roles?, created?}. A user without mail is reported as skipped, never guessed at.',
+            ],
+            'role_mapping' => [
+              'type' => 'object',
+              'description' => 'Source role id -> target role id, as confirmed at the role gate. An unmapped role, or one mapped to a role this site lacks, is reported in pending_target_setup.',
+            ],
+          ],
+          'required' => ['users'],
+        ],
+      ),
+      new Tool(
         name: 'import_menu_links',
         description: 'Upsert menu links into an existing menu (idempotent by source uuid). Node links are resolved through the migration source-key (source URL -> imported node); unresolvable links are reported, not guessed. Returns per-link {action, target}.',
         inputSchema: [
@@ -186,7 +204,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
   public function executeTool(string $toolId, mixed $arguments): array {
     foreach ([
       'get_icms_catalog', 'get_icms_component_contract', 'validate_pivot',
-      'import_pivot', 'import_taxonomy_terms', 'import_menu_links',
+      'import_pivot', 'import_taxonomy_terms', 'import_menu_links', 'import_users',
       'lookup_existing_node',
     ] as $known) {
       if ($toolId === $known || $toolId === md5($known)) {
