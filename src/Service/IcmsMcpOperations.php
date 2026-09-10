@@ -51,6 +51,15 @@ final class IcmsMcpOperations {
    */
   protected const IMPORT_LOCK_TIMEOUT = 120.0;
 
+  /**
+   * Assets skipped during the current import, as human-readable warnings.
+   *
+   * One unusable file must cost that file, not the page: before this, a
+   * single mp3 pointed at an image field, or a site-relative URL, aborted
+   * the whole node and every other field on it was lost with it.
+   */
+  protected array $mediaWarnings = [];
+
   public function __construct(
     protected EntityTypeManagerInterface $entityTypeManager,
     protected EntityTypeBundleInfoInterface $bundleInfo,
@@ -401,6 +410,7 @@ final class IcmsMcpOperations {
   ): array {
     $import = $pivot['drupal_import'] ?? [];
     $node_attrs = $import['node']['attributes'] ?? [];
+    $path_alias = (string) ($import['node']['path_alias'] ?? '');
     $paragraphs = $import['paragraphs'] ?? [];
     $existing_nid = $this->findNodeBySourceUrl($node_bundle, $source_field, $source_url);
 
@@ -475,10 +485,17 @@ final class IcmsMcpOperations {
         $paragraphs,
         $idempotence_key,
         $existing_nid,
+        $path_alias,
       );
       $translations_spec = is_array($import['translations'] ?? NULL) ? $import['translations'] : [];
       if ($translations_spec) {
         $result['translations'] = $this->writeTranslations((int) $result['nid'], $translations_spec);
+        // Translations run after the node result was assembled and can skip
+        // assets of their own.
+        if ($this->mediaWarnings) {
+          $result['warnings'] = $this->mediaWarnings;
+          $result['media_skipped_count'] = count($this->mediaWarnings);
+        }
       }
       $result['idempotence_key'] = $idempotence_key;
       $result['strategy'] = $strategy;
@@ -515,7 +532,9 @@ final class IcmsMcpOperations {
     array $paragraphs,
     string $idempotence_key,
     ?int $existing_nid,
+    string $path_alias = '',
   ): array {
+    $this->mediaWarnings = [];
     $node_storage = $this->entityTypeManager->getStorage('node');
     $paragraph_storage = $this->entityTypeManager->hasDefinition('paragraph')
       ? $this->entityTypeManager->getStorage('paragraph')
@@ -567,6 +586,7 @@ final class IcmsMcpOperations {
       $old_ref_ids,
       $child_paragraph_count,
     );
+    $this->applyPathAlias($node, $path_alias);
     $source_key_field = $this->sourceKeyFieldName();
     $node->set(
       $source_key_field,
@@ -608,7 +628,7 @@ final class IcmsMcpOperations {
       catch (\Throwable $e) { /* best effort */ }
     }
 
-    return [
+    $result = [
       'status' => 'ok',
       'nid' => (int) $node->id(),
       'vid' => (int) $node->getRevisionId(),
@@ -617,6 +637,11 @@ final class IcmsMcpOperations {
       'child_paragraph_count' => $child_paragraph_count,
       'media_count' => $media_count,
     ];
+    if ($this->mediaWarnings) {
+      $result['warnings'] = $this->mediaWarnings;
+      $result['media_skipped_count'] = count($this->mediaWarnings);
+    }
+    return $result;
   }
 
   /**
@@ -1071,6 +1096,8 @@ final class IcmsMcpOperations {
       unset($attrs['langcode']);
       $media_count = 0;
       $this->applyNodeAttributes($translation, $attrs, $media_count);
+      // Aliases are per language: the French page keeps the French path.
+      $this->applyPathAlias($translation, (string) ($translation_spec['node']['path_alias'] ?? ''));
 
       $paragraph_specs = is_array($translation_spec['paragraphs'] ?? NULL)
         ? $translation_spec['paragraphs']
@@ -1427,7 +1454,26 @@ final class IcmsMcpOperations {
     if ($field_type === 'entity_reference' && $target_type === 'media') {
       $references = [];
       foreach ($this->normalizeList($value) as $media_spec) {
-        $target_id = $this->resolveMediaReference($media_spec, $definition);
+        // An asset that cannot be resolved — unreachable, wrong type for the
+        // field, rejected by validation — costs that asset only. Failing the
+        // node here loses every other field on the page for one bad file.
+        try {
+          $target_id = $this->resolveMediaReference($media_spec, $definition);
+        }
+        catch (\Throwable $e) {
+          $this->mediaWarnings[] = sprintf(
+            "Field '%s' on %s:%s: skipped one media item — %s",
+            $name,
+            $entity->getEntityTypeId(),
+            $entity->bundle(),
+            $e->getMessage(),
+          );
+          $this->logger->warning('icms_mcp: skipped media on @field: @msg', [
+            '@field' => $name,
+            '@msg' => $e->getMessage(),
+          ]);
+          continue;
+        }
         if ($target_id !== NULL) {
           $references[] = ['target_id' => $target_id];
           $media_count++;
@@ -1526,7 +1572,11 @@ final class IcmsMcpOperations {
     }
     $bundle = $this->chooseMediaBundle($url, $allowed);
     if ($bundle === NULL) {
-      throw new \RuntimeException('No supported media bundle is allowed for remote media URL ' . $url);
+      throw new \RuntimeException(sprintf(
+        "No allowed media bundle can hold '%s' (this field allows: %s). Add a bundle for that file type on the target, or drop the asset from the mapping.",
+        basename((string) parse_url($url, PHP_URL_PATH)) ?: $url,
+        $allowed ? implode(', ', $allowed) : 'none',
+      ));
     }
 
     /** @var \Drupal\media\MediaTypeInterface|null $media_type */
@@ -1825,7 +1875,63 @@ final class IcmsMcpOperations {
   }
 
   /**
+   * Media bundles by the asset family they can legitimately hold.
+   *
+   * The names vary per install, so each family lists candidates in
+   * preference order and only an allowed one is used.
+   */
+  protected const MEDIA_BUNDLES_BY_FAMILY = [
+    'video' => ['video', 'file', 'document'],
+    'audio' => ['audio', 'file', 'document'],
+    'document' => ['document', 'file'],
+  ];
+
+  /**
+   * Extensions that are definitely not images, by asset family.
+   */
+  protected const NON_IMAGE_EXTENSIONS = [
+    'video' => ['mp4', 'webm', 'mov', 'm4v', 'ogv', 'avi', 'mpg', 'mpeg'],
+    'audio' => ['mp3', 'wav', 'ogg', 'oga', 'm4a', 'flac', 'aac', 'wma'],
+    'document' => ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'zip', 'csv', 'txt', 'rtf', 'odt'],
+  ];
+
+  /**
+   * Keep the source page's own path as the node's URL alias.
+   *
+   * Without this the target generates an alias from the title, so every URL
+   * on a migrated site changes and any path hierarchy flattens. Pathauto,
+   * when installed, would regenerate the alias on save and discard what we
+   * set, so the item is stamped to skip it.
+   *
+   * A blank alias leaves the target's own behaviour untouched — that is what
+   * a source front page (no path of its own) must do.
+   */
+  protected function applyPathAlias(\Drupal\Core\Entity\FieldableEntityInterface $entity, string $alias): void {
+    $alias = trim($alias);
+    if ($alias === '' || !$entity->hasField('path')) {
+      return;
+    }
+    $alias = '/' . ltrim($alias, '/');
+    if ($alias === '/') {
+      return;
+    }
+    $value = ['alias' => $alias];
+    $properties = $entity->getFieldDefinition('path')
+      ->getFieldStorageDefinition()
+      ->getPropertyNames();
+    if (in_array('pathauto', $properties, TRUE)) {
+      $value['pathauto'] = 0;
+    }
+    $entity->set('path', $value);
+  }
+
+  /**
    * Pick an allowed media bundle from the source URL.
+   *
+   * Falling back to `image` for an unrecognised asset is what turned one mp3
+   * into a failed page: the file reaches an image field, validation rejects
+   * the extension, and the import aborts. An asset whose family has no
+   * allowed bundle returns NULL so the caller can skip it with a reason.
    */
   protected function chooseMediaBundle(string $url, array $allowed): ?string {
     $host = strtolower((string) parse_url($url, PHP_URL_HOST));
@@ -1836,8 +1942,16 @@ final class IcmsMcpOperations {
     if ($extension === 'svg') {
       return in_array('icon', $allowed, TRUE) ? 'icon' : NULL;
     }
-    if (in_array($extension, ['mp4', 'webm', 'mov', 'm4v'], TRUE) && in_array('video', $allowed, TRUE)) {
-      return 'video';
+    foreach (self::NON_IMAGE_EXTENSIONS as $family => $extensions) {
+      if (!in_array($extension, $extensions, TRUE)) {
+        continue;
+      }
+      foreach (self::MEDIA_BUNDLES_BY_FAMILY[$family] as $candidate) {
+        if (in_array($candidate, $allowed, TRUE)) {
+          return $candidate;
+        }
+      }
+      return NULL;
     }
     if (in_array('image', $allowed, TRUE)) {
       return 'image';
