@@ -928,9 +928,28 @@ final class IcmsMcpOperations {
 
       // Resolve the target: internal node links go through the migration
       // source key so they point at the IMPORTED node.
+      //
+      // The migrator sends the source URL it actually imported the node under
+      // ("source_url"), because only it knows that: nodes are keyed by their
+      // ALIASED source URL (".../ueber-uns"), while a menu link names the node
+      // by id ("entity:node/87"). Reconstructing ".../node/87" here therefore
+      // matched nothing — a run imported 62 pages and every one of its 70
+      // links came back unresolved. The reconstruction stays as the fallback
+      // for a migrator that does not send it, and for sources whose keys are
+      // unaliased.
       $resolved_uri = '';
       $unresolved_reason = '';
-      if (preg_match('#^(?:entity:node/|internal:/node/)(\\d+)$#', $source_uri, $m)) {
+      $explicit_source_url = trim((string) ($spec['source_url'] ?? ''));
+      if ($explicit_source_url !== '' && preg_match('#^(?:entity:node/|internal:/node/)\\d+$#', $source_uri)) {
+        $nid = $this->findNodeBySourceUrl(NULL, $source_field, $explicit_source_url);
+        if ($nid !== NULL) {
+          $resolved_uri = 'entity:node/' . $nid;
+        }
+        else {
+          $unresolved_reason = "No imported node found for source {$explicit_source_url}.";
+        }
+      }
+      elseif (preg_match('#^(?:entity:node/|internal:/node/)(\\d+)$#', $source_uri, $m)) {
         $source_url = rtrim($source_base_url, '/') . '/node/' . $m[1];
         $nid = $this->findNodeBySourceUrl(NULL, $source_field, $source_url);
         if ($nid !== NULL) {
