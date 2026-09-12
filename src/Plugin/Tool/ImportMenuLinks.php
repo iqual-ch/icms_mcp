@@ -18,7 +18,7 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 #[Tool(
   id: 'import_menu_links',
   label: new TranslatableMarkup('Import menu links'),
-  description: new TranslatableMarkup('Upsert menu links into an existing menu (idempotent by source uuid). Node links are resolved through the migration source-key (source URL -> imported node); unresolvable links are reported, not guessed. Returns per-link {action, target}.'),
+  description: new TranslatableMarkup('Upsert menu links into an existing menu (idempotent by source uuid), parents before children. Node links are resolved through the migration source-key (source URL -> imported node); an unresolvable link is reported, not guessed, unless other links hang under it — then it is kept as a disabled <nolink> parent so the subtree keeps its shape. Returns per-link {action, target}.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [

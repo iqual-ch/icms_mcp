@@ -16,7 +16,7 @@ Seven tools. On the wire the names become `icms-mcp_<sanitized-tool-name>`
 | `icms-mcp_validate_pivot`         | Drupal-side validation of an `icms-drupal-import-handoff-v1` pivot.                       |
 | `icms-mcp_import_pivot`           | Transactional create/update of node + paragraphs + translations. Honours `strategy` and HITL gate. |
 | `icms-mcp_import_taxonomy_terms`  | Upsert one vocabulary's terms (uuid/name identity, hierarchy, translations). Step 3, before nodes. |
-| `icms-mcp_import_menu_links`      | Upsert one menu's links, parents before children; node links resolve via the source-key field. Step 3, after nodes. |
+| `icms-mcp_import_menu_links`      | Upsert one menu's links, parents before children; node links resolve via the source-key field, and a parent whose page is missing is kept disabled so its children keep their place. Step 3, after nodes. |
 | `icms-mcp_lookup_existing_node`   | Idempotency lookup by canonical source URL (matches against the configured source-key field). |
 
 `get_icms_catalog` intentionally replaces the old expanded v1 response. Use

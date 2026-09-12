@@ -45,6 +45,14 @@ final class IcmsMcpOperations {
   protected const DEFAULT_LAYOUTS_FIELD = 'field_icms_paragraphs';
 
   /**
+   * URI of a menu item that is a parent only — Drupal's unrouted "<nolink>".
+   *
+   * Given to an imported parent whose own page is missing on the target, so
+   * its children keep their place in the tree.
+   */
+  protected const PLACEHOLDER_LINK_URI = 'route:<nolink>';
+
+  /**
    * Seconds a per-page import lock is held (a large page with many
    * paragraphs and translations takes a few seconds; this is the ceiling
    * before the lock is considered stale).
@@ -920,9 +928,12 @@ final class IcmsMcpOperations {
     $link_storage = $this->entityTypeManager->getStorage('menu_link_content');
     $source_field = $this->sourceKeyFieldName();
 
+    $ordered = $this->orderLinksParentsFirst($links);
+    $parent_uuids = $this->parentUuids($ordered);
+
     $results = [];
     $uuid_to_plugin = [];
-    foreach ($this->orderLinksParentsFirst($links) as $spec) {
+    foreach ($ordered as $spec) {
       if (!is_array($spec) || trim((string) ($spec['title'] ?? '')) === '') {
         continue;
       }
@@ -973,13 +984,25 @@ final class IcmsMcpOperations {
         $resolved_uri = 'internal:' . (str_starts_with($source_uri, '/') ? $source_uri : '/' . $source_uri);
       }
 
+      // A link whose target was not migrated — most often a page left
+      // unpublished on the source — is dropped, but dropping a PARENT takes
+      // its whole subtree to the root with it. So a parent is kept as a
+      // disabled "<nolink>" item: the children keep their place, and nothing
+      // shows up in the site's navigation. A re-run after the page is
+      // imported turns the same link (matched by uuid) back into a real,
+      // enabled one. A childless link is still simply reported.
+      $is_placeholder = FALSE;
       if ($resolved_uri === '') {
-        $results[] = [
-          'title' => $title,
-          'status' => 'unresolved',
-          'reason' => $unresolved_reason ?: 'No usable link target.',
-        ];
-        continue;
+        if ($uuid === '' || !isset($parent_uuids[$uuid])) {
+          $results[] = [
+            'title' => $title,
+            'status' => 'unresolved',
+            'reason' => $unresolved_reason ?: 'No usable link target.',
+          ];
+          continue;
+        }
+        $is_placeholder = TRUE;
+        $resolved_uri = self::PLACEHOLDER_LINK_URI;
       }
 
       $existing = NULL;
@@ -1015,13 +1038,16 @@ final class IcmsMcpOperations {
         }
       }
 
+      $was_placeholder = $existing !== NULL
+        && (string) ($existing->link->uri ?? '') === self::PLACEHOLDER_LINK_URI;
+
       if ($existing === NULL) {
         $values = [
           'menu_name' => $menu,
           'title' => $title,
           'link' => ['uri' => $resolved_uri],
           'weight' => (int) ($spec['weight'] ?? 0),
-          'enabled' => (bool) ($spec['enabled'] ?? TRUE),
+          'enabled' => !$is_placeholder && (bool) ($spec['enabled'] ?? TRUE),
           'expanded' => (bool) ($spec['expanded'] ?? FALSE),
         ];
         if ($uuid !== '') {
@@ -1038,6 +1064,14 @@ final class IcmsMcpOperations {
         $link->set('title', $title);
         $link->set('link', ['uri' => $resolved_uri]);
         $link->set('weight', (int) ($spec['weight'] ?? $link->getWeight()));
+        if ($is_placeholder) {
+          $link->set('enabled', FALSE);
+        }
+        elseif ($was_placeholder) {
+          // The page exists now: the standing placeholder becomes the link
+          // the source describes.
+          $link->set('enabled', (bool) ($spec['enabled'] ?? TRUE));
+        }
         // Re-running an import repairs the hierarchy, including flattening a
         // link the source keeps at the root. Only a parent we could not
         // resolve leaves the existing placement alone, rather than moving a
@@ -1067,11 +1101,13 @@ final class IcmsMcpOperations {
       $uuid_to_plugin[$link->uuid()] = 'menu_link_content:' . $link->uuid();
       $results[] = [
         'title' => $title,
-        'status' => 'ok',
+        'status' => $is_placeholder ? 'placeholder' : 'ok',
         'action' => $action,
         'uri' => $resolved_uri,
         'parent' => $parent_plugin,
-      ] + ($parent_reason !== '' ? ['warning' => $parent_reason] : []);
+      ]
+        + ($is_placeholder ? ['reason' => $unresolved_reason ?: 'No usable link target.'] : [])
+        + ($parent_reason !== '' ? ['warning' => $parent_reason] : []);
     }
 
     return [
@@ -1079,9 +1115,31 @@ final class IcmsMcpOperations {
       'menu' => $menu,
       'link_count' => count($results),
       'unresolved_count' => count(array_filter($results, static fn (array $row) => ($row['status'] ?? '') === 'unresolved')),
+      'placeholder_count' => count(array_filter($results, static fn (array $row) => ($row['status'] ?? '') === 'placeholder')),
       'orphaned_count' => count(array_filter($results, static fn (array $row) => isset($row['warning']))),
       'links' => $results,
     ];
+  }
+
+  /**
+   * The uuids other links in this batch hang under.
+   *
+   * A link named here is a parent, so it has to exist on the target even
+   * when its own target page does not (::doImportMenuLinks keeps it as a
+   * disabled placeholder); anything else can be dropped alone.
+   */
+  protected function parentUuids(array $links): array {
+    $parents = [];
+    foreach ($links as $spec) {
+      $parent = (string) ($spec['parent'] ?? '');
+      if (str_starts_with($parent, 'menu_link_content:')) {
+        $parent = substr($parent, strlen('menu_link_content:'));
+      }
+      if ($parent !== '') {
+        $parents[$parent] = TRUE;
+      }
+    }
+    return $parents;
   }
 
   /**

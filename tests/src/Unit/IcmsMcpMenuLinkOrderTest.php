@@ -48,6 +48,25 @@ final class IcmsMcpMenuLinkOrderTest extends UnitTestCase {
     self::assertSame(['a', 'b', 'c'], $order);
   }
 
+  /** @covers ::parentUuids */
+  public function testAParentIsRecognizedWhateverFormItsChildNamesItIn(): void {
+    $class = new \ReflectionClass(IcmsMcpOperations::class);
+    $service = $class->newInstanceWithoutConstructor();
+    $method = $class->getMethod('parentUuids');
+    $method->setAccessible(TRUE);
+
+    $parents = $method->invoke($service, [
+      ['uuid' => 'parent', 'parent' => ''],
+      ['uuid' => 'child', 'parent' => 'menu_link_content:parent'],
+      ['uuid' => 'other', 'parent' => 'standard.front_page'],
+    ]);
+
+    // The set is matched against a link's own uuid, so the module-provided
+    // 'standard.front_page' in it is inert; what matters is that 'parent' is
+    // in it, which is what earns it a placeholder when its page is missing.
+    self::assertSame(['parent' => TRUE, 'standard.front_page' => TRUE], $parents);
+  }
+
   /** @covers ::orderLinksParentsFirst */
   public function testACycleIsEmittedRatherThanHangingTheImport(): void {
     $order = $this->order([
