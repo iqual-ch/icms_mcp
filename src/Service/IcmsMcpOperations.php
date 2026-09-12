@@ -902,6 +902,10 @@ final class IcmsMcpOperations {
 
   /**
    * Upsert menu links, resolving node targets through the source key.
+   *
+   * Links are written parents first (see ::orderLinksParentsFirst): a child
+   * saved before its parent exists has no plugin id to point at and Drupal
+   * silently mounts it at the root, which is how a whole menu arrived flat.
    */
   protected function doImportMenuLinks(string $menu, array $links, string $source_base_url): array {
     if ($menu === '' || !$this->entityTypeManager->hasDefinition('menu_link_content')) {
@@ -918,7 +922,7 @@ final class IcmsMcpOperations {
 
     $results = [];
     $uuid_to_plugin = [];
-    foreach ($links as $spec) {
+    foreach ($this->orderLinksParentsFirst($links) as $spec) {
       if (!is_array($spec) || trim((string) ($spec['title'] ?? '')) === '') {
         continue;
       }
@@ -983,12 +987,32 @@ final class IcmsMcpOperations {
         $matches = $link_storage->loadByProperties(['uuid' => $uuid]);
         $existing = $matches ? reset($matches) : NULL;
       }
+      // Source parents arrive as "menu_link_content:<uuid>" plugin ids; the
+      // uuid is preserved on import, so the target's plugin id is the same
+      // string. A parent already on the target (an earlier run, or a link
+      // this batch has not reached) is looked up in storage — the in-memory
+      // map alone only knows what this call has written so far.
       $parent_uuid = (string) ($spec['parent'] ?? '');
       $parent_plugin = '';
-      if ($parent_uuid !== '') {
-        // Source parents arrive as "menu_link_content:<uuid>" plugin ids.
-        $parent_uuid_clean = str_replace('menu_link_content:', '', $parent_uuid);
-        $parent_plugin = $uuid_to_plugin[$parent_uuid_clean] ?? '';
+      $parent_reason = '';
+      if ($parent_uuid !== '' && !str_starts_with($parent_uuid, 'menu_link_content:')) {
+        // A module- or view-provided parent ("standard.front_page"): its
+        // plugin id is site config, not content, so pass it through and let
+        // the target decide whether it knows it.
+        $parent_plugin = $parent_uuid;
+      }
+      elseif ($parent_uuid !== '') {
+        $parent_uuid_clean = substr($parent_uuid, strlen('menu_link_content:'));
+        if (isset($uuid_to_plugin[$parent_uuid_clean])) {
+          $parent_plugin = $uuid_to_plugin[$parent_uuid_clean];
+        }
+        elseif ($parent_uuid_clean !== '' && $link_storage->loadByProperties(['uuid' => $parent_uuid_clean])) {
+          $parent_plugin = 'menu_link_content:' . $parent_uuid_clean;
+          $uuid_to_plugin[$parent_uuid_clean] = $parent_plugin;
+        }
+        else {
+          $parent_reason = "Parent link {$parent_uuid_clean} is neither in this import nor on the target; placed at the root.";
+        }
       }
 
       if ($existing === NULL) {
@@ -1014,7 +1038,11 @@ final class IcmsMcpOperations {
         $link->set('title', $title);
         $link->set('link', ['uri' => $resolved_uri]);
         $link->set('weight', (int) ($spec['weight'] ?? $link->getWeight()));
-        if ($parent_plugin !== '') {
+        // Re-running an import repairs the hierarchy, including flattening a
+        // link the source keeps at the root. Only a parent we could not
+        // resolve leaves the existing placement alone, rather than moving a
+        // correctly nested link to the root on a partial re-run.
+        if ($parent_reason === '') {
           $link->set('parent', $parent_plugin);
         }
         $action = 'updated';
@@ -1037,7 +1065,13 @@ final class IcmsMcpOperations {
       }
       $link->save();
       $uuid_to_plugin[$link->uuid()] = 'menu_link_content:' . $link->uuid();
-      $results[] = ['title' => $title, 'status' => 'ok', 'action' => $action, 'uri' => $resolved_uri];
+      $results[] = [
+        'title' => $title,
+        'status' => 'ok',
+        'action' => $action,
+        'uri' => $resolved_uri,
+        'parent' => $parent_plugin,
+      ] + ($parent_reason !== '' ? ['warning' => $parent_reason] : []);
     }
 
     return [
@@ -1045,8 +1079,56 @@ final class IcmsMcpOperations {
       'menu' => $menu,
       'link_count' => count($results),
       'unresolved_count' => count(array_filter($results, static fn (array $row) => ($row['status'] ?? '') === 'unresolved')),
+      'orphaned_count' => count(array_filter($results, static fn (array $row) => isset($row['warning']))),
       'links' => $results,
     ];
+  }
+
+  /**
+   * The links, ordered so a parent is always written before its children.
+   *
+   * A source exports its links in whatever order it queries them (the
+   * PageDesigner export sorts by weight), so a child routinely arrives
+   * first. Its parent plugin id does not exist yet at that moment, the
+   * `parent` value is dropped, and Drupal mounts the link at the root — the
+   * import then reports every link as imported while the menu is flat.
+   *
+   * Links whose parent is outside this set (a module-provided link, an
+   * already-imported one, or a broken reference) are roots for the purpose
+   * of ordering; a parent cycle stops the walk, so those links keep their
+   * input order instead of hanging the import.
+   */
+  protected function orderLinksParentsFirst(array $links): array {
+    $links = array_values(array_filter($links, 'is_array'));
+    $index_by_uuid = [];
+    foreach ($links as $index => $spec) {
+      $uuid = trim((string) ($spec['uuid'] ?? ''));
+      if ($uuid !== '' && !isset($index_by_uuid[$uuid])) {
+        $index_by_uuid[$uuid] = $index;
+      }
+    }
+
+    $ordered = [];
+    $seen = [];
+    $emit = function (int $index) use (&$emit, &$ordered, &$seen, $links, $index_by_uuid): void {
+      // Set before recursing: a cycle revisiting this link stops here.
+      if (isset($seen[$index])) {
+        return;
+      }
+      $seen[$index] = TRUE;
+      $parent = (string) ($links[$index]['parent'] ?? '');
+      if (str_starts_with($parent, 'menu_link_content:')) {
+        $parent = substr($parent, strlen('menu_link_content:'));
+      }
+      if ($parent !== '' && isset($index_by_uuid[$parent]) && $index_by_uuid[$parent] !== $index) {
+        $emit($index_by_uuid[$parent]);
+      }
+      $ordered[] = $links[$index];
+    };
+    foreach (array_keys($links) as $index) {
+      $emit($index);
+    }
+    return $ordered;
   }
 
   /**
