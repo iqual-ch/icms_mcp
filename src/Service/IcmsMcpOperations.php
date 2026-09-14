@@ -13,7 +13,9 @@ use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\File\FileExists;
 use Drupal\Core\File\FileSystemInterface;
+use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\Core\Lock\LockBackendInterface;
+use Drupal\language\ConfigurableLanguageManagerInterface;
 use Drupal\Core\State\StateInterface;
 use GuzzleHttp\ClientInterface;
 use Psr\Log\LoggerInterface;
@@ -86,6 +88,7 @@ final class IcmsMcpOperations {
     protected FileSystemInterface $fileSystem,
     protected IcmsCatalogBuilder $catalogBuilder,
     protected LockBackendInterface $lock,
+    protected ?LanguageManagerInterface $languageManager = NULL,
   ) {}
 
   /**
@@ -126,6 +129,12 @@ final class IcmsMcpOperations {
         return $this->doImportUsers(
           is_array($arguments['users'] ?? NULL) ? $arguments['users'] : [],
           is_array($arguments['role_mapping'] ?? NULL) ? $arguments['role_mapping'] : [],
+        );
+      }
+      if ($toolId === 'import_webforms' || $toolId === md5('import_webforms')) {
+        return $this->doImportWebforms(
+          is_array($arguments['webforms'] ?? NULL) ? $arguments['webforms'] : [],
+          (bool) ($arguments['include_submissions'] ?? TRUE),
         );
       }
       if ($toolId === 'import_menu_links' || $toolId === md5('import_menu_links')) {
@@ -938,6 +947,171 @@ final class IcmsMcpOperations {
   }
 
   /**
+   * Import the source's webforms: config verbatim, submissions idempotently.
+   *
+   * A form the target does not have is created from the exported config array
+   * as-is (handlers and recipients included) plus its config translations for
+   * the languages this site has enabled. A form the target already has under
+   * the same id is the customer's: it is matched and its config left alone —
+   * only submissions are added. Submissions are idempotent by uuid, so a
+   * retried slice costs nothing, and their submitter is re-linked by e-mail
+   * (anonymous when the address is empty or unknown here); the source entity a
+   * submission was made on is dropped — a source nid means nothing here.
+   *
+   * @param array $webforms
+   *   `[{id, uuid?, label, status?, langcode?, config, configTranslations?,
+   *   submissions?: [{uuid, created, completed, changed, in_draft, langcode,
+   *   remote_addr, uid, mail, sticky, locked, notes, data}]}]`.
+   * @param bool $include_submissions
+   *   Whether the `submissions` lists are to be written at all.
+   */
+  protected function doImportWebforms(array $webforms, bool $include_submissions): array {
+    if (!$this->entityTypeManager->hasDefinition('webform')) {
+      return ['status' => 'error', 'reason' => 'the webform module is not installed on this site.'];
+    }
+    $webform_storage = $this->entityTypeManager->getStorage('webform');
+    $submission_storage = $this->entityTypeManager->hasDefinition('webform_submission')
+      ? $this->entityTypeManager->getStorage('webform_submission')
+      : NULL;
+    $enabled_languages = $this->languageManager ? array_keys($this->languageManager->getLanguages()) : [];
+
+    $results = [];
+    $created = 0;
+    $submissions_created = 0;
+    $submissions_skipped = 0;
+    foreach ($webforms as $spec) {
+      if (!is_array($spec)) {
+        continue;
+      }
+      $webform_id = trim((string) ($spec['id'] ?? ''));
+      if ($webform_id === '' || !preg_match('/^[a-z0-9_]{1,32}$/', $webform_id)) {
+        $results[] = ['id' => $webform_id, 'action' => 'error', 'reason' => 'webform id missing or not a machine name'];
+        continue;
+      }
+      $row = ['id' => $webform_id, 'submissionsCreated' => 0, 'submissionsSkipped' => 0];
+      $webform = $webform_storage->load($webform_id);
+      if ($webform === NULL) {
+        $config = is_array($spec['config'] ?? NULL) ? $spec['config'] : [];
+        unset($config['_core']);
+        $config['id'] = $webform_id;
+        if (!isset($config['title']) || trim((string) $config['title']) === '') {
+          $config['title'] = (string) ($spec['label'] ?? $webform_id);
+        }
+        if (isset($config['uuid']) && $this->uuidTaken('webform', (string) $config['uuid'])) {
+          unset($config['uuid']);
+        }
+        try {
+          $webform = $webform_storage->create($config);
+          $webform->save();
+        }
+        catch (\Throwable $e) {
+          $this->logger->error('icms_mcp: webform @id could not be created: @msg', ['@id' => $webform_id, '@msg' => $e->getMessage()]);
+          $results[] = $row + ['action' => 'error', 'reason' => 'create failed: ' . $e->getMessage()];
+          continue;
+        }
+        $created++;
+        $row['action'] = 'created';
+        $this->writeWebformTranslations($webform_id, is_array($spec['configTranslations'] ?? NULL) ? $spec['configTranslations'] : [], $enabled_languages);
+      }
+      else {
+        $row['action'] = 'matched';
+      }
+
+      if ($include_submissions && $submission_storage !== NULL) {
+        foreach ((array) ($spec['submissions'] ?? []) as $submission_spec) {
+          if (!is_array($submission_spec)) {
+            continue;
+          }
+          $uuid = trim((string) ($submission_spec['uuid'] ?? ''));
+          if ($uuid !== '' && $submission_storage->loadByProperties(['uuid' => $uuid])) {
+            $row['submissionsSkipped']++;
+            continue;
+          }
+          $values = [
+            'webform_id' => $webform_id,
+            'data' => is_array($submission_spec['data'] ?? NULL) ? $submission_spec['data'] : [],
+            'uid' => $this->resolveOwnerUid(['mail' => (string) ($submission_spec['mail'] ?? '')]) ?? 0,
+            'in_draft' => (int) (bool) ($submission_spec['in_draft'] ?? FALSE),
+            'sticky' => (int) (bool) ($submission_spec['sticky'] ?? FALSE),
+            'locked' => (int) (bool) ($submission_spec['locked'] ?? FALSE),
+            'notes' => (string) ($submission_spec['notes'] ?? ''),
+            'remote_addr' => (string) ($submission_spec['remote_addr'] ?? ''),
+          ];
+          if ($uuid !== '') {
+            $values['uuid'] = $uuid;
+          }
+          foreach (['created', 'completed', 'changed'] as $stamp) {
+            if ((int) ($submission_spec[$stamp] ?? 0) > 0) {
+              $values[$stamp] = (int) $submission_spec[$stamp];
+            }
+          }
+          $langcode = (string) ($submission_spec['langcode'] ?? '');
+          if ($langcode !== '' && ($enabled_languages === [] || in_array($langcode, $enabled_languages, TRUE))) {
+            $values['langcode'] = $langcode;
+          }
+          try {
+            $submission = $submission_storage->create($values);
+            $submission->save();
+            $row['submissionsCreated']++;
+          }
+          catch (\Throwable $e) {
+            $this->logger->warning('icms_mcp: submission @uuid on @id skipped: @msg', ['@uuid' => $uuid, '@id' => $webform_id, '@msg' => $e->getMessage()]);
+            $row['submissionsSkipped']++;
+            $row['submissionErrors'] = ($row['submissionErrors'] ?? 0) + 1;
+          }
+        }
+      }
+      $submissions_created += $row['submissionsCreated'];
+      $submissions_skipped += $row['submissionsSkipped'];
+      $results[] = $row;
+    }
+
+    $errors = count(array_filter($results, static fn (array $row): bool => ($row['action'] ?? '') === 'error'));
+    return [
+      'status' => 'ok',
+      'webform_count' => count($results),
+      'created_count' => $created,
+      'matched_count' => count($results) - $created - $errors,
+      'error_count' => $errors,
+      'submissions_created' => $submissions_created,
+      'submissions_skipped' => $submissions_skipped,
+      'webforms' => $results,
+    ];
+  }
+
+  /**
+   * Write a webform's config translations for the languages this site has.
+   */
+  protected function writeWebformTranslations(string $webform_id, array $translations, array $enabled_languages): void {
+    if (!$translations || !($this->languageManager instanceof ConfigurableLanguageManagerInterface)) {
+      return;
+    }
+    foreach ($translations as $langcode => $data) {
+      $langcode = (string) $langcode;
+      if (!is_array($data) || !$data || !in_array($langcode, $enabled_languages, TRUE)) {
+        continue;
+      }
+      try {
+        $override = $this->languageManager->getLanguageConfigOverride($langcode, 'webform.webform.' . $webform_id);
+        $override->setData($data)->save();
+      }
+      catch (\Throwable $e) {
+        $this->logger->warning('icms_mcp: webform @id translation @lc skipped: @msg', ['@id' => $webform_id, '@lc' => $langcode, '@msg' => $e->getMessage()]);
+      }
+    }
+  }
+
+  /**
+   * Whether an entity of the type already carries the uuid.
+   */
+  protected function uuidTaken(string $entity_type_id, string $uuid): bool {
+    if ($uuid === '') {
+      return FALSE;
+    }
+    return (bool) $this->entityTypeManager->getStorage($entity_type_id)->loadByProperties(['uuid' => $uuid]);
+  }
+
+  /**
    * The target uid for a `{email, name}` owner, or NULL to leave it alone.
    *
    * By e-mail only. A name is not an identity — two people share one, and
@@ -1722,6 +1896,34 @@ final class IcmsMcpOperations {
 
     if ($field_type === 'tablefield') {
       $entity->set($name, $this->buildTablefieldValue($value, $name, (string) $entity->bundle()));
+      return;
+    }
+
+    if ($field_type === 'webform') {
+      // The pivot names the target form by config id (`"kontakt"` or
+      // `{target_id}`); the webform import ran before the pages, so it
+      // exists — and when it does not, the field stays empty and says so
+      // rather than pointing at nothing.
+      $webform_id = is_array($value) ? (string) ($value['target_id'] ?? $value['id'] ?? '') : (string) $value;
+      $webform_id = trim($webform_id);
+      if ($webform_id === '') {
+        $entity->set($name, []);
+        return;
+      }
+      $exists = $this->entityTypeManager->hasDefinition('webform')
+        && $this->entityTypeManager->getStorage('webform')->load($webform_id) !== NULL;
+      if (!$exists) {
+        $this->mediaWarnings[] = sprintf(
+          "Field '%s' on %s:%s: webform '%s' does not exist on this site — left empty",
+          $name,
+          $entity->getEntityTypeId(),
+          $entity->bundle(),
+          $webform_id,
+        );
+        $entity->set($name, []);
+        return;
+      }
+      $entity->set($name, [['target_id' => $webform_id]]);
       return;
     }
 

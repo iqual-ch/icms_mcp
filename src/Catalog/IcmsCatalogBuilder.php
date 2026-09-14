@@ -56,6 +56,33 @@ final class IcmsCatalogBuilder {
    * `authenticated` are omitted: they are implicit on every account and never
    * a mapping decision.
    */
+  private function webforms(): array {
+    if (!$this->entityTypeManager->hasDefinition('webform')) {
+      return [];
+    }
+    return self::webformEntries($this->entityTypeManager->getStorage('webform')->loadMultiple());
+  }
+
+  /**
+   * `[{id, label}]` for webform config entities, sorted by id; example and
+   * template forms the module ships are left out.
+   *
+   * @param iterable<\Drupal\Core\Entity\EntityInterface> $webforms
+   *   Loaded webform entities.
+   */
+  public static function webformEntries(iterable $webforms): array {
+    $entries = [];
+    foreach ($webforms as $webform) {
+      $id = (string) $webform->id();
+      if ($id === '' || str_starts_with($id, 'example_') || str_starts_with($id, 'template_')) {
+        continue;
+      }
+      $entries[$id] = ['id' => $id, 'label' => (string) $webform->label()];
+    }
+    ksort($entries);
+    return array_values($entries);
+  }
+
   private function roles(): array {
     if (!$this->entityTypeManager->hasDefinition('user_role')) {
       return [];
@@ -189,6 +216,10 @@ final class IcmsCatalogBuilder {
       'site' => ['sourceKeyField' => $sourceField, 'layoutsField' => $layoutsField],
       'languages' => $this->languages(),
       'roles' => $this->roles(),
+      // The target's webforms, for the section gate's "bind to" dropdown, and
+      // whether the module exists at all — a source that ships forms needs it.
+      'webforms' => $this->webforms(),
+      'webformModuleInstalled' => $this->entityTypeManager->hasDefinition('webform'),
       'vocabularies' => $vocabularies,
       'fieldDefinitions' => $fieldDefinitions,
       'optionDefinitions' => $options,

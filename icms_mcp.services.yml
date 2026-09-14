@@ -25,6 +25,7 @@ services:
       - '@file_system'
       - '@icms_mcp.catalog_builder'
       - '@lock'
+      - '@?language_manager'
 
   icms_mcp.mcp_server_auth_route_subscriber:
     class: Drupal\icms_mcp\Routing\McpServerAuthRouteSubscriber
