@@ -68,6 +68,12 @@ final class IcmsMcpOperations {
    */
   protected array $mediaWarnings = [];
 
+  /**
+   * Option warnings of the current import (validation's `unknown_option` /
+   * `invalid_option_value`): reported with the result, never a refusal.
+   */
+  protected array $optionWarnings = [];
+
   public function __construct(
     protected EntityTypeManagerInterface $entityTypeManager,
     protected EntityTypeBundleInfoInterface $bundleInfo,
@@ -177,6 +183,7 @@ final class IcmsMcpOperations {
    */
   protected function doValidatePivot(array $pivot): array {
     $issues = [];
+    $warnings = [];
 
     if (($pivot['format'] ?? '') !== 'icms-drupal-import-handoff-v1') {
       $issues[] = ['path' => '/format', 'code' => 'unsupported_format', 'message' => 'Expected icms-drupal-import-handoff-v1.'];
@@ -250,6 +257,16 @@ final class IcmsMcpOperations {
       if (isset($para['options']) && !is_array($para['options'])) {
         $issues[] = ['path' => "/drupal_import/paragraphs/{$i}/options", 'code' => 'invalid_options', 'message' => 'Blökkli options must be an object.'];
       }
+      elseif (!empty($para['options'])) {
+        // Options the bundle does not declare, or values it does not accept,
+        // are WARNINGS, not issues: blökkli tolerates an extra behavior
+        // setting (it is simply never read), so refusing the whole page for
+        // one stray option would lose content over presentation. The report
+        // names them so the migration can fix its vocabulary.
+        foreach ($this->optionWarnings($bundle, $para['options'], "/drupal_import/paragraphs/{$i}/options") as $warning) {
+          $warnings[] = $warning;
+        }
+      }
       foreach (($para['attributes'] ?? []) as $name => $value) {
         if (!isset($defs[$name])) {
           $issues[] = ['path' => "/drupal_import/paragraphs/{$i}/attributes/{$name}", 'code' => 'unknown_field', 'message' => "Field '{$name}' does not exist on paragraph:{$bundle}."];
@@ -295,7 +312,51 @@ final class IcmsMcpOperations {
     return [
       'status' => $issues ? 'invalid' : 'ok',
       'issues' => $issues,
+      'warnings' => $warnings,
     ];
+  }
+
+  /**
+   * Option keys/values a bundle's blökkli schema does not know, as warnings.
+   *
+   * Reads the same schema the catalog publishes (`optionDefinitions`), so the
+   * migration's contract and this check agree. Without a schema on the site
+   * nothing can be said and nothing is warned.
+   */
+  protected function optionWarnings(string $bundle, array $options, string $path): array {
+    $definitions = $this->catalogBuilder->optionDefinitionsForBundle($bundle);
+    if ($definitions === NULL) {
+      return [];
+    }
+    $warnings = [];
+    foreach ($options as $name => $value) {
+      $name = (string) $name;
+      if (!isset($definitions[$name])) {
+        $warnings[] = [
+          'path' => "{$path}/{$name}",
+          'code' => 'unknown_option',
+          'message' => "Blökkli option '{$name}' is not declared for paragraph:{$bundle}; it is stored but never rendered.",
+        ];
+        continue;
+      }
+      $allowed = $definitions[$name]['values'] ?? [];
+      if ($allowed === [] || is_array($value)) {
+        continue;
+      }
+      $needle = is_bool($value) ? ($value ? 'true' : 'false') : mb_strtolower((string) $value);
+      $accepted = array_map(
+        static fn ($candidate): string => is_bool($candidate) ? ($candidate ? 'true' : 'false') : mb_strtolower((string) $candidate),
+        $allowed,
+      );
+      if (!in_array($needle, $accepted, TRUE)) {
+        $warnings[] = [
+          'path' => "{$path}/{$name}",
+          'code' => 'invalid_option_value',
+          'message' => "Blökkli option '{$name}' on paragraph:{$bundle} does not accept '" . (is_scalar($value) ? (string) $value : gettype($value)) . "' (accepts: " . implode(', ', array_map('strval', $allowed)) . ').',
+        ];
+      }
+    }
+    return $warnings;
   }
 
   // ---- Tool: import_pivot --------------------------------------------------
@@ -323,9 +384,11 @@ final class IcmsMcpOperations {
       return [
         'status' => 'invalid',
         'issues' => $validation['issues'],
+        'warnings' => $validation['warnings'] ?? [],
         'dry_run' => $dry_run,
       ];
     }
+    $this->optionWarnings = $validation['warnings'] ?? [];
 
     $metadata = $pivot['metadata'] ?? [];
     $idempotence_key = (string) ($metadata['idempotence_key'] ?? '');
@@ -501,7 +564,7 @@ final class IcmsMcpOperations {
         // Translations run after the node result was assembled and can skip
         // assets of their own.
         if ($this->mediaWarnings) {
-          $result['warnings'] = $this->mediaWarnings;
+          $result['warnings'] = array_merge($this->optionWarnings, $this->mediaWarnings);
           $result['media_skipped_count'] = count($this->mediaWarnings);
         }
       }
@@ -646,8 +709,11 @@ final class IcmsMcpOperations {
       'media_count' => $media_count,
     ];
     if ($this->mediaWarnings) {
-      $result['warnings'] = $this->mediaWarnings;
+      $result['warnings'] = array_merge($this->optionWarnings, $this->mediaWarnings);
       $result['media_skipped_count'] = count($this->mediaWarnings);
+    }
+    elseif ($this->optionWarnings) {
+      $result['warnings'] = $this->optionWarnings;
     }
     return $result;
   }

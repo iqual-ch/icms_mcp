@@ -6,13 +6,13 @@ options:
   colorMode: { values: [none, light, dark] }
   imageFormat: { values: [auto, landscape, portrait] }
   alignHorizontalFull: { values: [left, center, right] }
-  alignHorizontalReduced: { values: [left, center, right] }
+  alignHorizontalReduced: { values: [left, right] }
   alignVerticalFull: { values: [top, center, bottom] }
-  alignVerticalReduced: { values: [top, center, bottom] }
+  alignVerticalReduced: { values: [top, bottom] }
   slider: { values: [true, false] }
   sliderColumns: { values: [1, 2, 3, 4] }
-  cardVariant: { values: [] }
-  teaserStyle: { values: [] }
-  teaserVariant: { values: [] }
+  cardVariant: { values: [feature, text, spotlight, fact] }
+  teaserStyle: { values: [none, highlight] }
+  teaserVariant: { values: [teaser, feature, text, spotlight, flipTeaser, simple] }
   textColumns: { values: [one, two, three] }
   textShadow: { values: [none, light, dark, darker] }

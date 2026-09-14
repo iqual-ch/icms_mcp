@@ -13,6 +13,7 @@ use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\field\FieldStorageConfigInterface;
+use Drupal\paragraphs_blokkli\BlokkliOptionsSchemaHelper;
 use Symfony\Component\Yaml\Yaml;
 
 /** Builds compact ICMS catalog manifests and targeted component contracts. */
@@ -28,6 +29,7 @@ final class IcmsCatalogBuilder {
     private readonly ModuleHandlerInterface $moduleHandler,
     private readonly ModuleExtensionList $moduleExtensionList,
     private readonly LanguageManagerInterface $languageManager,
+    private readonly ?BlokkliOptionsSchemaHelper $schemaHelper = NULL,
   ) {}
 
   /**
@@ -112,7 +114,19 @@ final class IcmsCatalogBuilder {
         ];
         if ($entityType === 'paragraph') {
           $entry['role'] = (string) ($editorial['role'] ?? 'component');
-          $entry['optionRefs'] = str_starts_with($bundle, 'icms_layout_') ? array_keys($options) : [];
+          // The bundle's real options come from the frontend-generated blökkli
+          // schema (`paragraphs_blokkli.settings: schema_file`): a hero has no
+          // spacing, a media block no alignment, a button its own `buttonStyle`.
+          // Without a schema on this site the old approximation stands —
+          // every global option on every layout bundle, none on elements.
+          $schemaOptions = $this->schemaOptions($bundle);
+          if ($schemaOptions !== NULL) {
+            $entry['optionRefs'] = array_keys($schemaOptions);
+            $entry['optionDefinitions'] = $schemaOptions;
+          }
+          else {
+            $entry['optionRefs'] = str_starts_with($bundle, 'icms_layout_') ? array_keys($options) : [];
+          }
           $entry['childBundles'] = $this->childBundles($fields);
         }
         $index[$bundle] = $entry;
@@ -149,6 +163,21 @@ final class IcmsCatalogBuilder {
         $vocabularies[(string) $vocabulary->id()] = (string) $vocabulary->label();
       }
       ksort($vocabularies);
+    }
+
+    // The hand-maintained option list documents; the schema knows the values.
+    // A global option whose values the yml leaves empty (`cardVariant`,
+    // `teaserVariant`, …) takes them from the first bundle that declares it,
+    // so the migration can spell a value the target actually accepts.
+    foreach ($indexes['paragraphTypes'] as $entry) {
+      foreach ($entry['optionDefinitions'] ?? [] as $name => $definition) {
+        if (!isset($options[$name])) {
+          continue;
+        }
+        if (empty($options[$name]['values']) && !empty($definition['values'])) {
+          $options[$name]['values'] = $definition['values'];
+        }
+      }
     }
 
     $manifest = [
@@ -316,6 +345,66 @@ final class IcmsCatalogBuilder {
       'minItems' => (int) ($editorial['minItems'] ?? 0),
       'mediaBundles' => array_values(array_unique($mediaTargets)),
     ];
+  }
+
+  /**
+   * A bundle's options from the blökkli schema, in catalog shape; NULL = no schema.
+   *
+   * `{name: {type, default, values, label}}`. `values` is what the migration
+   * normalises against: the radio/checkbox keys, `[true, false]` for a
+   * checkbox, the integer range for a number. An empty array from the helper
+   * is a bundle the schema knows nothing about, which is also "no schema"
+   * for that bundle (blökkli then offers no options on it).
+   */
+  public function optionDefinitionsForBundle(string $bundle): ?array {
+    return $this->schemaOptions($bundle);
+  }
+
+  private function schemaOptions(string $bundle): ?array {
+    if ($this->schemaHelper === NULL) {
+      return NULL;
+    }
+    try {
+      $schema = $this->schemaHelper->getOptionsForBundle($bundle);
+    }
+    catch (\Throwable) {
+      return NULL;
+    }
+    if (!is_array($schema)) {
+      return NULL;
+    }
+    return self::definitionsFromSchema($schema);
+  }
+
+  /**
+   * Convert one bundle's blökkli schema block to catalog option definitions.
+   */
+  public static function definitionsFromSchema(array $schema): array {
+    $definitions = [];
+    foreach ($schema as $name => $spec) {
+      if (!is_array($spec)) {
+        continue;
+      }
+      $type = (string) ($spec['type'] ?? 'radios');
+      $values = [];
+      if (isset($spec['options']) && is_array($spec['options'])) {
+        $values = array_map('strval', array_keys($spec['options']));
+      }
+      elseif ($type === 'checkbox') {
+        $values = [TRUE, FALSE];
+      }
+      elseif ($type === 'number' && isset($spec['min'], $spec['max'])) {
+        $values = range((int) $spec['min'], (int) $spec['max']);
+      }
+      $definitions[(string) $name] = [
+        'type' => $type,
+        'default' => $spec['default'] ?? NULL,
+        'values' => array_values($values),
+        'label' => (string) ($spec['label'] ?? $name),
+      ];
+    }
+    ksort($definitions);
+    return $definitions;
   }
 
   private function descriptions(): array {

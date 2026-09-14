@@ -9,6 +9,7 @@ services:
       - '@module_handler'
       - '@extension.list.module'
       - '@language_manager'
+      - '@?paragraphs_blokkli.options_schema_helper'
 
   icms_mcp.operations:
     class: Drupal\icms_mcp\Service\IcmsMcpOperations
