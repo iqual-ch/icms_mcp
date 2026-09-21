@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Drupal\icms_mcp\Plugin\Tool;
+namespace Drupal\icms_mcp\Plugin\mcp_server\Tool;
 
 use Drupal\icms_mcp\Service\IcmsMcpOperations;
 use Drupal\Core\Session\AccountProxyInterface;
@@ -13,25 +13,27 @@ use Mcp\Server\ClientGateway;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * MCP tool: validate_pivot — thin adapter over IcmsMcpOperations.
+ * MCP tool: get_icms_component_contract — thin adapter over IcmsMcpOperations.
  */
 #[Tool(
-  id: 'validate_pivot',
-  label: new TranslatableMarkup('Validate pivot'),
-  description: new TranslatableMarkup('Validate a pivot document against the LIVE field definitions on this site. Catches drift between the bundled contract and what is actually installed. Returns a list of {path, code, message} issues.'),
+  id: 'get_icms_component_contract',
+  label: new TranslatableMarkup('Get ICMS component contract'),
+  description: new TranslatableMarkup('Resolve full live contracts for selected node, paragraph, or media bundles. Optionally includes nested paragraph child bundles.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [
-      'pivot' => ['type' => 'object', 'description' => 'The icms-drupal-import-handoff-v1 pivot document.'],
+      'entity_type' => ['type' => 'string', 'enum' => ['node', 'paragraph', 'media']],
+      'bundles' => ['type' => 'array', 'items' => ['type' => 'string'], 'maxItems' => 25],
+      'include_children' => ['type' => 'boolean', 'default' => TRUE],
     ],
-    'required' => ['pivot'],
+    'required' => ['entity_type', 'bundles'],
   ],
   readOnly: TRUE,
   destructive: FALSE,
   idempotent: TRUE,
   openWorld: FALSE,
 )]
-final class ValidatePivot extends ToolPluginBase {
+final class GetIcmsComponentContract extends ToolPluginBase {
 
   protected IcmsMcpOperations $operations;
 
@@ -67,7 +69,7 @@ final class ValidatePivot extends ToolPluginBase {
    * {@inheritdoc}
    */
   public function execute(array $arguments, ClientGateway $gateway): mixed {
-    return $this->operations->execute('validate_pivot', $arguments);
+    return $this->operations->execute('get_icms_component_contract', $arguments);
   }
 
 }

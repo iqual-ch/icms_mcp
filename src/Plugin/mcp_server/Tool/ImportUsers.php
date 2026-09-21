@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Drupal\icms_mcp\Plugin\Tool;
+namespace Drupal\icms_mcp\Plugin\mcp_server\Tool;
 
 use Drupal\icms_mcp\Service\IcmsMcpOperations;
 use Drupal\Core\Session\AccountProxyInterface;
@@ -13,27 +13,26 @@ use Mcp\Server\ClientGateway;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * MCP tool: import_pivot — thin adapter over IcmsMcpOperations.
+ * MCP tool: import_users — thin adapter over IcmsMcpOperations.
  */
 #[Tool(
-  id: 'import_pivot',
-  label: new TranslatableMarkup('Import pivot'),
-  description: new TranslatableMarkup('Transactionally import a pivot document. Honours strategy = skip | update | skip-or-update | fail-if-exists. Respects review_decision = review_required (HITL gate) unless approve=true. Returns {status, nid, revision_id, idempotence_key, journal}.'),
+  id: 'import_users',
+  label: new TranslatableMarkup('Import users'),
+  description: new TranslatableMarkup('Upsert the source site\'s accounts so imported nodes can be owned by a person (idempotent by e-mail). New accounts are created BLOCKED and without a password — this imports authorship, not access — and no notification mail is ever sent. An account that already exists is matched, never renamed or unblocked; only mapped roles are added. Users import BEFORE nodes. Returns per-user {targetUid, action} plus `pending_target_setup` for source roles with no target.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [
-      'pivot' => ['type' => 'object', 'description' => 'The icms-drupal-import-handoff-v1 pivot document.'],
-      'dry_run' => ['type' => 'boolean', 'description' => 'If true, validate + plan changes without writing.', 'default' => FALSE],
-      'approve' => ['type' => 'boolean', 'description' => 'Required when metadata.review_decision = review_required. Acknowledges human approval.', 'default' => FALSE],
+      'users' => ['type' => 'array', 'description' => 'Source accounts: {uid, uuid?, name, mail, status?, roles?, created?}. A user without `mail` is reported as skipped, never guessed at.'],
+      'role_mapping' => ['type' => 'object', 'description' => 'Source role id → target role id, as confirmed at the migration\'s role gate. An unmapped source role, or one mapped to a role this site lacks, is reported in `pending_target_setup`.'],
     ],
-    'required' => ['pivot'],
+    'required' => ['users'],
   ],
   readOnly: FALSE,
   destructive: TRUE,
   idempotent: TRUE,
   openWorld: TRUE,
 )]
-final class ImportPivot extends ToolPluginBase {
+final class ImportUsers extends ToolPluginBase {
 
   protected IcmsMcpOperations $operations;
 
@@ -69,7 +68,7 @@ final class ImportPivot extends ToolPluginBase {
    * {@inheritdoc}
    */
   public function execute(array $arguments, ClientGateway $gateway): mixed {
-    return $this->operations->execute('import_pivot', $arguments);
+    return $this->operations->execute('import_users', $arguments);
   }
 
 }

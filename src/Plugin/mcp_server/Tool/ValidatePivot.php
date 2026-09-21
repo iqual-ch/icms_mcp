@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Drupal\icms_mcp\Plugin\Tool;
+namespace Drupal\icms_mcp\Plugin\mcp_server\Tool;
 
 use Drupal\icms_mcp\Service\IcmsMcpOperations;
 use Drupal\Core\Session\AccountProxyInterface;
@@ -13,19 +13,25 @@ use Mcp\Server\ClientGateway;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * MCP tool: get_icms_catalog — thin adapter over IcmsMcpOperations.
+ * MCP tool: validate_pivot — thin adapter over IcmsMcpOperations.
  */
 #[Tool(
-  id: 'get_icms_catalog',
-  label: new TranslatableMarkup('Get ICMS catalog'),
-  description: new TranslatableMarkup('Return the compact normalized ICMS catalog v2 manifest: bundle indexes, capabilities, reusable field/option definitions, descriptions, and catalogHash.'),
-  inputSchema: ['type' => 'object', 'properties' => new \stdClass(), 'required' => []],
+  id: 'validate_pivot',
+  label: new TranslatableMarkup('Validate pivot'),
+  description: new TranslatableMarkup('Validate a pivot document against the LIVE field definitions on this site. Catches drift between the bundled contract and what is actually installed. Returns a list of {path, code, message} issues.'),
+  inputSchema: [
+    'type' => 'object',
+    'properties' => [
+      'pivot' => ['type' => 'object', 'description' => 'The icms-drupal-import-handoff-v1 pivot document.'],
+    ],
+    'required' => ['pivot'],
+  ],
   readOnly: TRUE,
   destructive: FALSE,
   idempotent: TRUE,
   openWorld: FALSE,
 )]
-final class GetIcmsCatalog extends ToolPluginBase {
+final class ValidatePivot extends ToolPluginBase {
 
   protected IcmsMcpOperations $operations;
 
@@ -61,7 +67,7 @@ final class GetIcmsCatalog extends ToolPluginBase {
    * {@inheritdoc}
    */
   public function execute(array $arguments, ClientGateway $gateway): mixed {
-    return $this->operations->execute('get_icms_catalog', $arguments);
+    return $this->operations->execute('validate_pivot', $arguments);
   }
 
 }

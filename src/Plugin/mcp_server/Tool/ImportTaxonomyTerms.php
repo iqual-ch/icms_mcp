@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Drupal\icms_mcp\Plugin\Tool;
+namespace Drupal\icms_mcp\Plugin\mcp_server\Tool;
 
 use Drupal\icms_mcp\Service\IcmsMcpOperations;
 use Drupal\Core\Session\AccountProxyInterface;
@@ -13,27 +13,26 @@ use Mcp\Server\ClientGateway;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * MCP tool: import_menu_links — thin adapter over IcmsMcpOperations.
+ * MCP tool: import_taxonomy_terms — thin adapter over IcmsMcpOperations.
  */
 #[Tool(
-  id: 'import_menu_links',
-  label: new TranslatableMarkup('Import menu links'),
-  description: new TranslatableMarkup('Upsert menu links into an existing menu (idempotent by source uuid), parents before children. Node links are resolved through the migration source-key (source URL -> imported node); an unresolvable link is reported, not guessed, unless other links hang under it — then it is kept as a disabled <nolink> parent so the subtree keeps its shape. Returns per-link {action, target}.'),
+  id: 'import_taxonomy_terms',
+  label: new TranslatableMarkup('Import taxonomy terms'),
+  description: new TranslatableMarkup('Upsert one vocabulary of taxonomy terms (idempotent by source uuid, then by name). Preserves hierarchy, weights, and per-language labels. Returns per-term {tid, action}.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [
-      'menu' => ['type' => 'string', 'description' => 'Target menu machine name (must exist).'],
-      'links' => ['type' => 'array', 'description' => 'Links: {uuid, title, titles?, uri (source uri), parent (source uuid or empty), weight?, enabled?}.'],
-      'source_base_url' => ['type' => 'string', 'description' => 'Source site base URL, used to resolve internal link targets against imported nodes.'],
+      'vocabulary' => ['type' => 'string', 'description' => 'Target vocabulary machine name (must exist).'],
+      'terms' => ['type' => 'array', 'description' => 'Terms: {uuid?, name, labels?, description?, parent (source tid or 0), tid (source id), weight?}.'],
     ],
-    'required' => ['menu', 'links'],
+    'required' => ['vocabulary', 'terms'],
   ],
   readOnly: FALSE,
   destructive: TRUE,
   idempotent: TRUE,
   openWorld: TRUE,
 )]
-final class ImportMenuLinks extends ToolPluginBase {
+final class ImportTaxonomyTerms extends ToolPluginBase {
 
   protected IcmsMcpOperations $operations;
 
@@ -69,7 +68,7 @@ final class ImportMenuLinks extends ToolPluginBase {
    * {@inheritdoc}
    */
   public function execute(array $arguments, ClientGateway $gateway): mixed {
-    return $this->operations->execute('import_menu_links', $arguments);
+    return $this->operations->execute('import_taxonomy_terms', $arguments);
   }
 
 }

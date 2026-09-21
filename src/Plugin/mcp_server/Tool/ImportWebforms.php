@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Drupal\icms_mcp\Plugin\Tool;
+namespace Drupal\icms_mcp\Plugin\mcp_server\Tool;
 
 use Drupal\icms_mcp\Service\IcmsMcpOperations;
 use Drupal\Core\Session\AccountProxyInterface;

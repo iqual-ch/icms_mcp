@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Drupal\icms_mcp\Plugin\Tool;
+namespace Drupal\icms_mcp\Plugin\mcp_server\Tool;
 
 use Drupal\icms_mcp\Service\IcmsMcpOperations;
 use Drupal\Core\Session\AccountProxyInterface;
@@ -13,27 +13,27 @@ use Mcp\Server\ClientGateway;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * MCP tool: get_icms_component_contract — thin adapter over IcmsMcpOperations.
+ * MCP tool: import_pivot — thin adapter over IcmsMcpOperations.
  */
 #[Tool(
-  id: 'get_icms_component_contract',
-  label: new TranslatableMarkup('Get ICMS component contract'),
-  description: new TranslatableMarkup('Resolve full live contracts for selected node, paragraph, or media bundles. Optionally includes nested paragraph child bundles.'),
+  id: 'import_pivot',
+  label: new TranslatableMarkup('Import pivot'),
+  description: new TranslatableMarkup('Transactionally import a pivot document. Honours strategy = skip | update | skip-or-update | fail-if-exists. Respects review_decision = review_required (HITL gate) unless approve=true. Returns {status, nid, revision_id, idempotence_key, journal}.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [
-      'entity_type' => ['type' => 'string', 'enum' => ['node', 'paragraph', 'media']],
-      'bundles' => ['type' => 'array', 'items' => ['type' => 'string'], 'maxItems' => 25],
-      'include_children' => ['type' => 'boolean', 'default' => TRUE],
+      'pivot' => ['type' => 'object', 'description' => 'The icms-drupal-import-handoff-v1 pivot document.'],
+      'dry_run' => ['type' => 'boolean', 'description' => 'If true, validate + plan changes without writing.', 'default' => FALSE],
+      'approve' => ['type' => 'boolean', 'description' => 'Required when metadata.review_decision = review_required. Acknowledges human approval.', 'default' => FALSE],
     ],
-    'required' => ['entity_type', 'bundles'],
+    'required' => ['pivot'],
   ],
-  readOnly: TRUE,
-  destructive: FALSE,
+  readOnly: FALSE,
+  destructive: TRUE,
   idempotent: TRUE,
-  openWorld: FALSE,
+  openWorld: TRUE,
 )]
-final class GetIcmsComponentContract extends ToolPluginBase {
+final class ImportPivot extends ToolPluginBase {
 
   protected IcmsMcpOperations $operations;
 
@@ -69,7 +69,7 @@ final class GetIcmsComponentContract extends ToolPluginBase {
    * {@inheritdoc}
    */
   public function execute(array $arguments, ClientGateway $gateway): mixed {
-    return $this->operations->execute('get_icms_component_contract', $arguments);
+    return $this->operations->execute('import_pivot', $arguments);
   }
 
 }

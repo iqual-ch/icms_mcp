@@ -108,6 +108,12 @@ import attempt.
 The full stack (drupal/mcp_server, simple_oauth, consumers) is pulled in
 transitively — nothing else to require on the target project.
 
+mcp_server **2.0.0-beta4 or newer** is required: beta4 moved tool discovery
+from `src/Plugin/Tool/` to `src/Plugin/mcp_server/Tool/`, where this module's
+tools now live. On an older beta the site answers `/mcp` normally and
+advertises no tools at all, which the migration agent reports as "Drupal MCP
+tool not advertised by target site".
+
 ```bash
 ddev composer require 'iqual/icms_mcp'
 ddev drush en icms_mcp -y     # prints the OAuth client credentials ONCE
