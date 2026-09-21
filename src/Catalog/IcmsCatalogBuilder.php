@@ -306,6 +306,10 @@ final class IcmsCatalogBuilder {
   private function describeField(FieldDefinitionInterface $definition): array {
     $data = $this->storageDefinition($definition) + [
       'label' => (string) $definition->getLabel(),
+      // The editor-facing help text: what the field is FOR. The node-field
+      // mapping gate shows it beside the label so a reviewer picking a target
+      // for an unfamiliar source field has more than a machine name to go on.
+      'description' => trim(strip_tags((string) $definition->getDescription())),
       'required' => $definition->isRequired(),
       // The symmetric translation model needs the fields INSIDE the paragraph
       // types translatable, or a matched language still degrades to node scalar
@@ -324,6 +328,9 @@ final class IcmsCatalogBuilder {
     $propertyMaxLengths = $this->propertyMaxLengths($definition);
     if ($propertyMaxLengths) {
       $data['propertyMaxLengths'] = $propertyMaxLengths;
+    }
+    if ($data['description'] === '') {
+      unset($data['description']);
     }
     return $data;
   }
