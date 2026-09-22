@@ -83,6 +83,26 @@ final class IcmsCatalogBuilder {
     return array_values($entries);
   }
 
+  /**
+   * The site's menus, so the migration's menu gate can offer the REAL ones.
+   *
+   * Without this the agent falls back to Drupal's standard four (main, footer,
+   * account, tools) and a menu the product ships — ICMS's `meta` — is not
+   * offered at all, although the target has it: the reviewer has to type its
+   * machine name by hand to map anything onto it.
+   */
+  private function menus(): array {
+    if (!$this->entityTypeManager->hasDefinition('menu')) {
+      return [];
+    }
+    $menus = [];
+    foreach ($this->entityTypeManager->getStorage('menu')->loadMultiple() as $menu) {
+      $menus[] = ['id' => $menu->id(), 'label' => (string) $menu->label()];
+    }
+    usort($menus, static fn (array $a, array $b): int => strcmp($a['id'], $b['id']));
+    return $menus;
+  }
+
   private function roles(): array {
     if (!$this->entityTypeManager->hasDefinition('user_role')) {
       return [];
@@ -211,11 +231,14 @@ final class IcmsCatalogBuilder {
       'status' => 'ok',
       // v3 adds `languages`, per-bundle `contentTranslationEnabled` and a
       // `translatable` flag on each field, so the translation checklist items
-      // become verifiable instead of advisory. Readers tolerate v2.
+      // become verifiable instead of advisory. It also carries `menus`, so the
+      // menu gate maps onto the target's real menus instead of Drupal's
+      // standard four. Readers tolerate v2.
       'format' => 'icms-target-catalog-v3',
       'site' => ['sourceKeyField' => $sourceField, 'layoutsField' => $layoutsField],
       'languages' => $this->languages(),
       'roles' => $this->roles(),
+      'menus' => $this->menus(),
       // The target's webforms, for the section gate's "bind to" dropdown, and
       // whether the module exists at all — a source that ships forms needs it.
       'webforms' => $this->webforms(),
