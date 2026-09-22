@@ -2446,6 +2446,24 @@ final class IcmsMcpOperations {
         }
       }
     }
+    elseif (in_array($field_type, ['timestamp', 'created', 'changed'], TRUE)) {
+      // Node stamps and scheduler dates: the pivot sends unix seconds. Saying
+      // so here beats a save-time exception the run reports as a crash.
+      foreach ($this->normalizeList($value) as $index => $stamp) {
+        $raw = is_array($stamp) ? ($stamp['value'] ?? NULL) : $stamp;
+        if (!(is_int($raw) || (is_string($raw) && ctype_digit($raw)))) {
+          $issues[] = ['path' => "{$path}/{$index}", 'code' => 'invalid_timestamp', 'message' => "Field '{$definition->getName()}' takes a unix timestamp (integer seconds)."];
+        }
+      }
+    }
+    elseif ($field_type === 'boolean') {
+      foreach ($this->normalizeList($value) as $index => $flag) {
+        $raw = is_array($flag) ? ($flag['value'] ?? NULL) : $flag;
+        if (!(is_bool($raw) || in_array($raw, [0, 1, '0', '1'], TRUE))) {
+          $issues[] = ['path' => "{$path}/{$index}", 'code' => 'invalid_boolean', 'message' => "Field '{$definition->getName()}' takes a boolean."];
+        }
+      }
+    }
     elseif ($field_type === 'entity_reference' && $target_type === 'media') {
       foreach ($this->normalizeList($value) as $index => $media) {
         $valid = is_int($media)

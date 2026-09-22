@@ -146,6 +146,9 @@ final class IcmsCatalogBuilder {
       $index = [];
       foreach ($bundles as $bundle => $info) {
         $fields = $this->configuredFields($entityType, $bundle);
+        if ($entityType === 'node') {
+          $fields += $this->baseNodeFields($bundle);
+        }
         foreach ($fields as $name => $definition) {
           $key = $entityType . '.' . $name;
           $fieldDefinitions[$key] ??= $this->storageDefinition($definition);
@@ -205,11 +208,19 @@ final class IcmsCatalogBuilder {
     // HITL offers these as "map to" targets. Creating vocabularies is target
     // setup (config-in-git via the dev skill), never an MCP write.
     $vocabularies = [];
+    // `vocabularies` stays the id → label map every consumer relies on; the
+    // details beside it carry what the vocabulary gate shows a reviewer.
+    $vocabularyDetails = [];
     if ($this->entityTypeManager->hasDefinition('taxonomy_vocabulary')) {
       foreach ($this->entityTypeManager->getStorage('taxonomy_vocabulary')->loadMultiple() as $vocabulary) {
         $vocabularies[(string) $vocabulary->id()] = (string) $vocabulary->label();
+        $vocabularyDetails[(string) $vocabulary->id()] = [
+          'label' => (string) $vocabulary->label(),
+          'description' => trim(strip_tags((string) $vocabulary->getDescription())),
+        ];
       }
       ksort($vocabularies);
+      ksort($vocabularyDetails);
     }
 
     // The hand-maintained option list documents; the schema knows the values.
@@ -244,6 +255,7 @@ final class IcmsCatalogBuilder {
       'webforms' => $this->webforms(),
       'webformModuleInstalled' => $this->entityTypeManager->hasDefinition('webform'),
       'vocabularies' => $vocabularies,
+      'vocabularyDetails' => $vocabularyDetails,
       'fieldDefinitions' => $fieldDefinitions,
       'optionDefinitions' => $options,
       'nodeTypes' => $indexes['nodeTypes'],
@@ -270,10 +282,14 @@ final class IcmsCatalogBuilder {
         continue;
       }
       $fields = $this->configuredFields($entityType, $bundle);
+      $baseFields = $entityType === 'node' ? $this->baseNodeFields($bundle) : [];
       $editorial = $this->descriptions()[$entityType][$bundle] ?? [];
       $resolved = [];
       foreach ($fields as $name => $definition) {
         $resolved[$name] = $this->describeField($definition);
+      }
+      foreach ($baseFields as $name => $definition) {
+        $resolved[$name] = $this->describeField($definition) + ['baseField' => TRUE];
       }
       $components[$bundle] = [
         'id' => $bundle,
@@ -307,6 +323,28 @@ final class IcmsCatalogBuilder {
     ];
   }
 
+  /**
+   * The node base fields a migration may write, as a mapping target list.
+   *
+   * `configuredFields()` keeps configurable fields only, so `created` and
+   * `sticky` never reached the node-field gate although the import sets any
+   * field the node has. The scheduler pair is present only when that module
+   * provides it — this is what tells the engine, whose static fallback list
+   * cannot know. `status`, `uid`, `title` and `langcode` stay out: the pivot
+   * sets them itself.
+   */
+  private function baseNodeFields(string $bundle): array {
+    $definitions = $this->fieldManager->getFieldDefinitions('node', $bundle);
+    $names = ['created', 'changed', 'promote', 'sticky', 'publish_on', 'unpublish_on'];
+    $fields = [];
+    foreach ($names as $name) {
+      if (isset($definitions[$name]) && !($definitions[$name]->getFieldStorageDefinition() instanceof FieldStorageConfigInterface)) {
+        $fields[$name] = $definitions[$name];
+      }
+    }
+    return $fields;
+  }
+
   private function configuredFields(string $entityType, string $bundle): array {
     return array_filter(
       $this->fieldManager->getFieldDefinitions($entityType, $bundle),
@@ -317,9 +355,13 @@ final class IcmsCatalogBuilder {
   private function storageDefinition(FieldDefinitionInterface $definition): array {
     $storage = $definition->getFieldStorageDefinition();
     $maxLength = $definition->getSetting('max_length');
+    // Drupal types the two node stamps `created`/`changed`; for a mapping
+    // they are timestamps like any other, and the engine's type table stays small.
+    $fieldType = in_array($definition->getType(), ['created', 'changed'], TRUE) ? 'timestamp' : $definition->getType();
     return array_filter([
       'fieldName' => $definition->getName(),
-      'fieldType' => $definition->getType(),
+      'fieldType' => $fieldType,
+      'baseField' => $storage instanceof FieldStorageConfigInterface ? NULL : TRUE,
       'cardinality' => $storage->getCardinality(),
       'targetType' => $definition->getSetting('target_type') ?: NULL,
       'maxLength' => is_numeric($maxLength) && (int) $maxLength > 0 ? (int) $maxLength : NULL,
