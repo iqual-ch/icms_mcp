@@ -681,6 +681,7 @@ final class IcmsMcpOperations {
             'type' => $para['type'] ?? '',
             'fields' => $para['attributes'] ?? [],
             'options' => $para['options'] ?? [],
+            'status' => $para['status'] ?? NULL,
           ],
           $paragraph_storage,
           $child_paragraph_count,
@@ -1525,6 +1526,7 @@ final class IcmsMcpOperations {
               'type' => $para['type'] ?? '',
               'fields' => $para['attributes'] ?? [],
               'options' => $para['options'] ?? [],
+              'status' => $para['status'] ?? NULL,
             ],
             $paragraph_storage,
             $child_paragraph_count,
@@ -1780,6 +1782,12 @@ final class IcmsMcpOperations {
     $entity = $paragraph_storage->create(
       ['type' => $bundle] + ($langcode !== '' ? ['langcode' => $langcode] : []),
     );
+    // A source element the editor never published migrates unpublished rather
+    // than not at all: the content reaches the target and an editor decides
+    // there. Absent means published, which is every ordinary paragraph.
+    if (array_key_exists('status', $spec) && $spec['status'] !== NULL) {
+      $entity->setPublished((bool) $spec['status']);
+    }
     $fields = $spec['fields'] ?? $spec['attributes'] ?? [];
     if (!is_array($fields)) {
       throw new \InvalidArgumentException("Fields for paragraph '{$bundle}' must be an object.");
