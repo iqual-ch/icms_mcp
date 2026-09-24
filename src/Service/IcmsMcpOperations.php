@@ -566,6 +566,7 @@ final class IcmsMcpOperations {
         $idempotence_key,
         $existing_nid,
         $path_alias,
+        is_array($import['node']['redirects'] ?? NULL) ? $import['node']['redirects'] : [],
       );
       $translations_spec = is_array($import['translations'] ?? NULL) ? $import['translations'] : [];
       if ($translations_spec) {
@@ -613,6 +614,7 @@ final class IcmsMcpOperations {
     string $idempotence_key,
     ?int $existing_nid,
     string $path_alias = '',
+    array $redirects = [],
   ): array {
     $this->mediaWarnings = [];
     $node_storage = $this->entityTypeManager->getStorage('node');
@@ -709,6 +711,8 @@ final class IcmsMcpOperations {
       catch (\Throwable $e) { /* best effort */ }
     }
 
+    [$redirect_count, $redirect_warnings] = $this->applyRedirects($node, $redirects, $path_alias);
+
     $result = [
       'status' => 'ok',
       'nid' => (int) $node->id(),
@@ -718,14 +722,73 @@ final class IcmsMcpOperations {
       'child_paragraph_count' => $child_paragraph_count,
       'media_count' => $media_count,
     ];
+    if ($redirects) {
+      $result['redirect_count'] = $redirect_count;
+    }
+    $warnings = array_merge($this->optionWarnings, $this->mediaWarnings, $redirect_warnings);
+    if ($warnings) {
+      $result['warnings'] = $warnings;
+    }
     if ($this->mediaWarnings) {
-      $result['warnings'] = array_merge($this->optionWarnings, $this->mediaWarnings);
       $result['media_skipped_count'] = count($this->mediaWarnings);
     }
-    elseif ($this->optionWarnings) {
-      $result['warnings'] = $this->optionWarnings;
-    }
     return $result;
+  }
+
+  /**
+   * Point the source's old paths at the imported node.
+   *
+   * The handoff lists `{source, langcode, statusCode}` per node: the source
+   * site's redirect entities to that page, plus its own former path when the
+   * alias had to change. Without them every bookmarked and externally linked
+   * URL of the old site 404s after the switch. One redirect entity per source
+   * path and language, updated in place on re-import so a second run does not
+   * duplicate it; a path equal to the node's own alias is skipped (it would
+   * loop). Without the redirect module the list is reported, not written.
+   *
+   * @return array{0: int, 1: string[]}
+   *   Redirects written, and warnings for those that were not.
+   */
+  protected function applyRedirects(\Drupal\node\NodeInterface $node, array $redirects, string $path_alias): array {
+    if (!$redirects) {
+      return [0, []];
+    }
+    if (!$this->entityTypeManager->hasDefinition('redirect')) {
+      return [0, [sprintf('redirects: %d source redirect(s) not written — the redirect module is not installed on the target.', count($redirects))]];
+    }
+    $storage = $this->entityTypeManager->getStorage('redirect');
+    $alias = ltrim(trim($path_alias), '/');
+    $written = 0;
+    $warnings = [];
+    $seen = [];
+    foreach ($redirects as $spec) {
+      if (!is_array($spec)) {
+        continue;
+      }
+      $source = trim((string) ($spec['source'] ?? ''));
+      $source = ltrim(strtok($source, '?') ?: '', '/');
+      $langcode = trim((string) ($spec['langcode'] ?? '')) ?: 'und';
+      $status = (int) ($spec['statusCode'] ?? $spec['status_code'] ?? 301) ?: 301;
+      if ($source === '' || $source === $alias || isset($seen[$langcode . ':' . $source])) {
+        continue;
+      }
+      $seen[$langcode . ':' . $source] = TRUE;
+      try {
+        $existing = $storage->loadByProperties(['redirect_source__path' => $source, 'language' => $langcode]);
+        /** @var \Drupal\redirect\Entity\Redirect $redirect */
+        $redirect = $existing ? reset($existing) : $storage->create(['language' => $langcode]);
+        $redirect->setSource($source);
+        $redirect->setRedirect('/node/' . $node->id());
+        $redirect->setStatusCode($status);
+        $redirect->setLanguage($langcode);
+        $redirect->save();
+        $written++;
+      }
+      catch (\Throwable $e) {
+        $warnings[] = sprintf("redirects: '/%s' (%s) not written: %s", $source, $langcode, $e->getMessage());
+      }
+    }
+    return [$written, $warnings];
   }
 
   /**
