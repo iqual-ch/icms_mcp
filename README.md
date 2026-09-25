@@ -13,11 +13,17 @@ Seven tools. On the wire the names become `icms-mcp_<sanitized-tool-name>`
 | --------------------------------- | ---------------------------------------------------------------------------------------- |
 | `icms-mcp_get_icms_catalog`       | Compact normalized v2 manifest with hash, indexes, capabilities, descriptions, fields, options and existing taxonomy vocabularies. |
 | `icms-mcp_get_icms_component_contract` | Full contracts for selected node, paragraph or media bundles, optionally including paragraph children. |
+| `icms-mcp_get_frontend_theme_files` | Read-only: the Nuxt frontend's theme layer as it is on this target (`app.config.ts`, `theme/*.css`, `base/typography.css`, `utilities/utilities.css`, `project/*.css`, `tailwind.css`, `nuxt.config.ts`, `package.json`), from `<repo>/frontend` (`ICMS_MCP_FRONTEND_DIR` overrides), so a design handoff can be diffed against what the project already themes. |
 | `icms-mcp_validate_pivot`         | Drupal-side validation of an `icms-drupal-import-handoff-v1` pivot.                       |
 | `icms-mcp_import_pivot`           | Transactional create/update of node + paragraphs + translations. Honours `strategy` and HITL gate. |
 | `icms-mcp_import_taxonomy_terms`  | Upsert one vocabulary's terms (uuid/name identity, hierarchy, translations). Step 3, before nodes. |
 | `icms-mcp_import_menu_links`      | Upsert one menu's links, parents before children; node links resolve via the source-key field, and a parent whose page is missing is kept disabled so its children keep their place. Step 3, after nodes. |
 | `icms-mcp_lookup_existing_node`   | Idempotency lookup by canonical source URL (matches against the configured source-key field). |
+
+The catalog also carries `editorTextStyles`: per text format, the CKEditor 5 style
+plugin's styles (label, tag, classes) and the classes the format allows on text tags —
+what a source's `lead` / `small` / blockquote text can bind to, and what a design
+handoff's type scale still has to add.
 
 `get_icms_catalog` intentionally replaces the old expanded v1 response. Use
 `get_icms_component_contract` for details; clients should cache by
