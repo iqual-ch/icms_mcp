@@ -60,6 +60,15 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         ],
       ),
       new Tool(
+        name: 'get_frontend_theme_files',
+        description: 'Return the Nuxt frontend\'s theme layer as it is on this target (app.config.ts, theme/*.css, base/typography.css, utilities/utilities.css, project/*.css, tailwind.css), read-only, so a design handoff can be compared with what the project already has.',
+        inputSchema: [
+          'type' => 'object',
+          'properties' => (object) [],
+          'required' => [],
+        ],
+      ),
+      new Tool(
         name: 'get_icms_component_contract',
         description: 'Resolve full live contracts for selected node, paragraph, or media bundles. Optionally includes nested paragraph child bundles.',
         inputSchema: [
@@ -203,7 +212,7 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
    */
   public function executeTool(string $toolId, mixed $arguments): array {
     foreach ([
-      'get_icms_catalog', 'get_icms_component_contract', 'validate_pivot',
+      'get_icms_catalog', 'get_icms_component_contract', 'get_frontend_theme_files', 'validate_pivot',
       'import_pivot', 'import_taxonomy_terms', 'import_menu_links', 'import_users',
       'lookup_existing_node',
     ] as $known) {

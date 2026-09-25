@@ -103,6 +103,9 @@ final class IcmsMcpOperations {
       if ($toolId === 'get_icms_catalog' || $toolId === md5('get_icms_catalog')) {
         return $this->doGetCatalog();
       }
+      if ($toolId === 'get_frontend_theme_files' || $toolId === md5('get_frontend_theme_files')) {
+        return $this->doGetFrontendThemeFiles();
+      }
       if ($toolId === 'get_icms_component_contract' || $toolId === md5('get_icms_component_contract')) {
         return $this->catalogBuilder->buildComponentContracts(
           (string) ($arguments['entity_type'] ?? ''),
@@ -183,6 +186,69 @@ final class IcmsMcpOperations {
       $this->sourceKeyFieldName(),
       $this->layoutsFieldName(),
     );
+  }
+
+  // ---- Tool: get_frontend_theme_files --------------------------------------
+
+  /**
+   * The theme files the frontend carries right now, read-only.
+   *
+   * The ICMS project layout puts the Nuxt app at `<repo>/frontend` beside
+   * `<repo>/drupal/docroot`; `ICMS_MCP_FRONTEND_DIR` overrides the root. Each
+   * file comes back with its content (up to 256 KiB) or `exists: false`, so
+   * a design handoff can be diffed against what the project already themes
+   * instead of overwriting it blind.
+   */
+  protected function doGetFrontendThemeFiles(): array {
+    $root = getenv('ICMS_MCP_FRONTEND_DIR') ?: dirname(DRUPAL_ROOT, 2) . '/frontend';
+    $root = rtrim($root, '/');
+    $paths = [
+      'app/app.config.ts',
+      'app/assets/css/tailwind.css',
+      'app/assets/css/theme/theme.css',
+      'app/assets/css/theme/colors.css',
+      'app/assets/css/base/typography.css',
+      'app/assets/css/base/fonts.css',
+      'app/assets/css/utilities/utilities.css',
+      'app/assets/css/project/ck-content.css',
+      'app/assets/css/ckeditor.css',
+      'nuxt.config.ts',
+      'package.json',
+    ];
+    foreach (glob($root . '/app/assets/css/theme/color-*.css') ?: [] as $ramp) {
+      $paths[] = substr($ramp, strlen($root) + 1);
+    }
+    $files = [];
+    foreach ($paths as $path) {
+      $absolute = $root . '/' . $path;
+      $real = realpath($absolute);
+      if ($real === FALSE || !str_starts_with($real, realpath($root) ?: $root) || !is_file($real)) {
+        $files[] = ['path' => $path, 'exists' => FALSE];
+        continue;
+      }
+      $bytes = (int) filesize($real);
+      $entry = ['path' => $path, 'exists' => TRUE, 'bytes' => $bytes];
+      if ($bytes <= 262144) {
+        $entry['content'] = (string) @file_get_contents($real);
+      }
+      $files[] = $entry;
+    }
+    $package = NULL;
+    $package_json = $root . '/package.json';
+    if (is_file($package_json)) {
+      $decoded = json_decode((string) @file_get_contents($package_json), TRUE);
+      $package = is_array($decoded) ? [
+        'nuxtIcms' => (string) ($decoded['dependencies']['@iqual/nuxt-icms'] ?? $decoded['devDependencies']['@iqual/nuxt-icms'] ?? ''),
+        'hasStylesCkeditor' => isset($decoded['scripts']['styles:ckeditor']),
+      ] : NULL;
+    }
+    return [
+      'status' => is_dir($root) ? 'ok' : 'error',
+      'reason' => is_dir($root) ? NULL : 'frontend directory not found; set ICMS_MCP_FRONTEND_DIR',
+      'frontendDir' => $root,
+      'package' => $package,
+      'files' => $files,
+    ];
   }
 
   // ---- Tool: validate_pivot ------------------------------------------------

@@ -84,6 +84,71 @@ final class IcmsCatalogBuilder {
   }
 
   /**
+   * The rich-text styles the ICMS editor offers, per text format.
+   *
+   * Reads every `editor.editor.*` config: the CKEditor 5 style plugin's
+   * `styles` (label + the element with its classes) and the matching text
+   * format's `filter_html` `allowed_html`, reduced to the classes it allows
+   * on `<p>` and `<span>`. Empty when no editor is configured.
+   */
+  private function editorTextStyles(): array {
+    $formats = [];
+    foreach ($this->configFactory->listAll('editor.editor.') as $name) {
+      $editor = $this->configFactory->get($name);
+      $format = (string) ($editor->get('format') ?? substr($name, strlen('editor.editor.')));
+      $styles = $editor->get('settings.plugins.ckeditor5_style.styles');
+      $filter = $this->configFactory->get('filter.format.' . $format);
+      $formats[$format] = self::editorTextStyleEntry(
+        $format,
+        (string) ($filter->get('name') ?? $format),
+        is_array($styles) ? $styles : [],
+        (string) ($filter->get('filters.filter_html.settings.allowed_html') ?? ''),
+      );
+    }
+    ksort($formats);
+    return array_values($formats);
+  }
+
+  /**
+   * One format's editor styles: `{format, label, styles: [{label, element, classes}],
+   * allowedClasses: {p: [...], span: [...]}}`.
+   *
+   * @param array<int, array{label?: string, element?: string}> $styles
+   *   The `ckeditor5_style.styles` entries.
+   */
+  public static function editorTextStyleEntry(string $format, string $label, array $styles, string $allowed_html): array {
+    $entries = [];
+    foreach ($styles as $style) {
+      $element = (string) ($style['element'] ?? '');
+      if ($element === '') {
+        continue;
+      }
+      $tag = preg_match('/^<\s*([a-z0-9]+)/i', $element, $m) ? strtolower($m[1]) : '';
+      $classes = preg_match('/class="([^"]*)"/', $element, $m) ? preg_split('/\s+/', trim($m[1])) ?: [] : [];
+      $entries[] = [
+        'label' => (string) ($style['label'] ?? ''),
+        'element' => $element,
+        'tag' => $tag,
+        'classes' => array_values(array_filter($classes)),
+      ];
+    }
+    $allowed = [];
+    if (preg_match_all('/<(p|span|h[1-6]|blockquote)\b([^>]*)>/i', $allowed_html, $tags, PREG_SET_ORDER)) {
+      foreach ($tags as $tag) {
+        $name = strtolower($tag[1]);
+        $classes = preg_match('/class="([^"]*)"/', $tag[2], $m) ? preg_split('/\s+/', trim($m[1])) ?: [] : [];
+        $allowed[$name] = array_values(array_unique(array_merge($allowed[$name] ?? [], array_filter($classes))));
+      }
+    }
+    return [
+      'format' => $format,
+      'label' => $label,
+      'styles' => $entries,
+      'allowedClasses' => $allowed,
+    ];
+  }
+
+  /**
    * The site's menus, so the migration's menu gate can offer the REAL ones.
    *
    * Without this the agent falls back to Drupal's standard four (main, footer,
@@ -254,6 +319,11 @@ final class IcmsCatalogBuilder {
       // whether the module exists at all — a source that ships forms needs it.
       'webforms' => $this->webforms(),
       'webformModuleInstalled' => $this->entityTypeManager->hasDefinition('webform'),
+      // The rich-text styles the editor offers (CKEditor 5 style plugin +
+      // the format's allowed classes): what a source's `lead` / `small` /
+      // blockquote text can bind to, and what a design handoff's type scale
+      // has to add before an editor can pick it.
+      'editorTextStyles' => $this->editorTextStyles(),
       'vocabularies' => $vocabularies,
       'vocabularyDetails' => $vocabularyDetails,
       'fieldDefinitions' => $fieldDefinitions,
