@@ -188,6 +188,34 @@ class IcmsMcp extends McpPluginBase implements ContainerFactoryPluginInterface {
         ],
       ),
       new Tool(
+        name: 'rewrite_node_links',
+        description: 'Post-import pass: replace links inside an imported node (every translation, layout paragraphs recursively). Each {from, to} rewrites href="<from>" in text fields and link-field uris equal to <from> or ending in its #fragment. Returns {status, nid, replaced, paragraphs_touched, unmatched}.',
+        inputSchema: [
+          'type' => 'object',
+          'properties' => [
+            'nid' => ['type' => 'integer'],
+            'replacements' => [
+              'type' => 'array',
+              'items' => [
+                'type' => 'object',
+                'properties' => ['from' => ['type' => 'string'], 'to' => ['type' => 'string']],
+                'required' => ['from', 'to'],
+              ],
+            ],
+          ],
+          'required' => ['nid', 'replacements'],
+        ],
+      ),
+      new Tool(
+        name: 'set_front_page',
+        description: 'Make an imported, published node the site front page. Returns {status, nid, previous, current}.',
+        inputSchema: [
+          'type' => 'object',
+          'properties' => ['nid' => ['type' => 'integer']],
+          'required' => ['nid'],
+        ],
+      ),
+      new Tool(
         name: 'lookup_existing_node',
         description: 'Idempotency check: return {nid, content_hash, idempotence_key, changed} of the most recent node previously imported from this source URL, or null.',
         inputSchema: [

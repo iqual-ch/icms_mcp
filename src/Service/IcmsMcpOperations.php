@@ -13,6 +13,7 @@ use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\File\FileExists;
 use Drupal\Core\File\FileSystemInterface;
+use Drupal\Core\File\FileUrlGeneratorInterface;
 use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\Core\Lock\LockBackendInterface;
 use Drupal\language\ConfigurableLanguageManagerInterface;
@@ -76,6 +77,25 @@ final class IcmsMcpOperations {
    */
   protected array $optionWarnings = [];
 
+  /**
+   * Layout paragraphs created by the running import, in sequence order:
+   * `{sequence, id, revision_id}`. The migrator's post-import pass turns an
+   * in-page anchor into `#<paragraph id>`, which only exists after the write.
+   */
+  protected array $paragraphReport = [];
+
+  /**
+   * Media resolved by the running import (default language and translations):
+   * `{sourceUrl, mediaId, bundle, fileUrl}`, keyed by source URL. A document
+   * link in text is rewritten to `fileUrl` by the post-import pass.
+   */
+  protected array $mediaReport = [];
+
+  /**
+   * Paragraph translations whose published state the handoff set explicitly.
+   */
+  protected int $paragraphStatusApplied = 0;
+
   public function __construct(
     protected EntityTypeManagerInterface $entityTypeManager,
     protected EntityTypeBundleInfoInterface $bundleInfo,
@@ -89,6 +109,7 @@ final class IcmsMcpOperations {
     protected IcmsCatalogBuilder $catalogBuilder,
     protected LockBackendInterface $lock,
     protected ?LanguageManagerInterface $languageManager = NULL,
+    protected ?FileUrlGeneratorInterface $fileUrlGenerator = NULL,
   ) {}
 
   /**
@@ -162,6 +183,15 @@ final class IcmsMcpOperations {
       }
       if ($toolId === 'lookup_existing_node' || $toolId === md5('lookup_existing_node')) {
         return $this->doLookupExistingNode((string) ($arguments['source_url'] ?? ''));
+      }
+      if ($toolId === 'rewrite_node_links' || $toolId === md5('rewrite_node_links')) {
+        return $this->doRewriteNodeLinks(
+          (int) ($arguments['nid'] ?? 0),
+          is_array($arguments['replacements'] ?? NULL) ? $arguments['replacements'] : [],
+        );
+      }
+      if ($toolId === 'set_front_page' || $toolId === md5('set_front_page')) {
+        return $this->doSetFrontPage((int) ($arguments['nid'] ?? 0));
       }
     }
     catch (\Throwable $e) {
@@ -623,6 +653,9 @@ final class IcmsMcpOperations {
     // 5. Real write — wrap in a transaction so a paragraph failure rolls back
     //    the parent node create. We re-throw on error so the transaction's
     //    `__destruct` rolls back rather than committing.
+    $this->paragraphReport = [];
+    $this->mediaReport = [];
+    $this->paragraphStatusApplied = 0;
     $transaction = $this->database->startTransaction('icms_mcp_import');
     try {
       $result = $this->writeNodeAndParagraphs(
@@ -643,6 +676,19 @@ final class IcmsMcpOperations {
           $result['warnings'] = array_merge($this->optionWarnings, $this->mediaWarnings);
           $result['media_skipped_count'] = count($this->mediaWarnings);
         }
+      }
+      // Documents linked from text but placed in no field: created as media
+      // now so the post-import pass can point the links at their files.
+      $linked = $pivot['pivot']['target']['linkedDocuments'] ?? [];
+      $linked_warnings = is_array($linked) ? $this->importLinkedDocuments($linked) : [];
+      if ($linked_warnings) {
+        $result['warnings'] = array_merge($result['warnings'] ?? [], $linked_warnings);
+      }
+      // What this import created, for the post-import link pass.
+      $result['paragraphs'] = array_values($this->paragraphReport);
+      $result['media'] = array_values($this->mediaReport);
+      if ($this->paragraphStatusApplied > 0) {
+        $result['paragraph_status_applied'] = $this->paragraphStatusApplied;
       }
       $result['idempotence_key'] = $idempotence_key;
       $result['strategy'] = $strategy;
@@ -743,7 +789,7 @@ final class IcmsMcpOperations {
     if ($paragraphs && $paragraph_storage !== NULL) {
       $sorted = $this->sortParagraphsBySequence($paragraphs);
       $paragraph_langcode = $node->language()->getId();
-      foreach ($sorted as $para) {
+      foreach ($sorted as $index => $para) {
         $entity = $this->createParagraphFromSpec(
           [
             'type' => $para['type'] ?? '',
@@ -760,6 +806,11 @@ final class IcmsMcpOperations {
         $created_paragraphs[] = [
           'target_id' => $entity->id(),
           'target_revision_id' => $entity->getRevisionId(),
+        ];
+        $this->paragraphReport[] = [
+          'sequence' => (int) ($para['sequence'] ?? $index),
+          'id' => (int) $entity->id(),
+          'revision_id' => (int) $entity->getRevisionId(),
         ];
       }
       $node->set($this->layoutsFieldName(), $created_paragraphs);
@@ -1698,6 +1749,8 @@ final class IcmsMcpOperations {
                 $langcode,
                 $media_count,
                 $untranslated_fields,
+                0,
+                array_key_exists('status', $para) && $para['status'] !== NULL ? (bool) $para['status'] : NULL,
               );
             }
             $paragraphs_translated = TRUE;
@@ -1838,6 +1891,7 @@ final class IcmsMcpOperations {
     int &$media_count,
     array &$untranslated_fields,
     int $depth = 0,
+    ?bool $status = NULL,
   ): void {
     if ($depth > 8) {
       throw new \RuntimeException('Paragraph nesting exceeds the supported depth of 8.');
@@ -1845,6 +1899,14 @@ final class IcmsMcpOperations {
     $translation = $paragraph->hasTranslation($langcode)
       ? $paragraph->getTranslation($langcode)
       : $paragraph->addTranslation($langcode, []);
+    // Publication state is per language on a translatable paragraph: Drupal
+    // keeps no per-field fallback once the translation exists, so an element
+    // the source left unpublished in French only has to be sent as such.
+    // Absent means published, as on the default-language path.
+    if ($status !== NULL) {
+      $translation->setPublished($status);
+      $this->paragraphStatusApplied++;
+    }
     foreach ($fields as $name => $value) {
       if (!$translation->hasField($name)) {
         continue;
@@ -1869,6 +1931,7 @@ final class IcmsMcpOperations {
             $media_count,
             $untranslated_fields,
             $depth + 1,
+            array_key_exists('status', $child_spec) && $child_spec['status'] !== NULL ? (bool) $child_spec['status'] : NULL,
           );
         }
         continue;
@@ -2163,7 +2226,9 @@ final class IcmsMcpOperations {
         ->range(0, 1)
         ->execute();
       if ($existing_media) {
-        return (int) reset($existing_media);
+        $media_id = (int) reset($existing_media);
+        $this->reportMedia($url, $media_id, $bundle, NULL);
+        return $media_id;
       }
       $media = $this->entityTypeManager->getStorage('media')->create([
         'bundle' => $bundle,
@@ -2172,6 +2237,7 @@ final class IcmsMcpOperations {
       ]);
       $media->set($source_field, $source_type === 'link' ? ['uri' => $url] : $url);
       $this->validateAndSaveMedia($media);
+      $this->reportMedia($url, (int) $media->id(), $bundle, NULL);
       return (int) $media->id();
     }
 
@@ -2189,7 +2255,9 @@ final class IcmsMcpOperations {
       ->range(0, 1)
       ->execute();
     if ($existing_media) {
-      return (int) reset($existing_media);
+      $media_id = (int) reset($existing_media);
+      $this->reportMedia($url, $media_id, $bundle, $file);
+      return $media_id;
     }
 
     $media = $this->entityTypeManager->getStorage('media')->create([
@@ -2211,7 +2279,102 @@ final class IcmsMcpOperations {
     }
     $media->set($source_field, $field_value);
     $this->validateAndSaveMedia($media);
+    $this->reportMedia($url, (int) $media->id(), $bundle, $file);
     return (int) $media->id();
+  }
+
+  /**
+   * Record one resolved media item for the import result.
+   */
+  protected function reportMedia(string $source_url, int $media_id, string $bundle, ?\Drupal\file\FileInterface $file): void {
+    $file_url = NULL;
+    if ($file !== NULL) {
+      $file_url = $this->fileUrlGenerator !== NULL
+        ? $this->fileUrlGenerator->generateAbsoluteString($file->getFileUri())
+        : \Drupal::service('file_url_generator')->generateAbsoluteString($file->getFileUri());
+    }
+    $this->mediaReport[$source_url] = [
+      'sourceUrl' => $source_url,
+      'mediaId' => $media_id,
+      'bundle' => $bundle,
+      'fileUrl' => $file_url,
+    ];
+  }
+
+  /**
+   * Create unplaced document media for files only linked from text.
+   *
+   * The pivot lists them as `target.linkedDocuments[{src, title}]`. Each
+   * becomes a media item of the first bundle that can hold the file (the
+   * media library shows it; nothing references it yet) and is reported in
+   * `media`, so the post-import pass rewrites the text link to the file URL.
+   * A file that cannot be fetched costs that file only.
+   *
+   * @return string[]
+   *   Warnings for documents that were not created.
+   */
+  protected function importLinkedDocuments(array $documents): array {
+    $warnings = [];
+    $all_bundles = array_keys($this->bundleInfo->getBundleInfo('media'));
+    foreach ($documents as $document) {
+      if (!is_array($document)) {
+        continue;
+      }
+      $url = trim((string) ($document['src'] ?? $document['url'] ?? ''));
+      if ($url === '' || isset($this->mediaReport[$url])) {
+        continue;
+      }
+      try {
+        if (!filter_var($url, FILTER_VALIDATE_URL) || !in_array(parse_url($url, PHP_URL_SCHEME), ['http', 'https'], TRUE)) {
+          throw new \InvalidArgumentException("Invalid document URL '{$url}'.");
+        }
+        $file = $this->downloadRemoteFile($url);
+        // The bundle from the stored file, not the link: a media route
+        // (`/de/media/123`) says nothing about what it serves.
+        $bundle = $this->chooseMediaBundle('https://file.local/' . basename($file->getFileUri()), $all_bundles);
+        if ($bundle === NULL || $bundle === 'remote_video') {
+          throw new \RuntimeException("No media bundle can hold '" . basename($file->getFileUri()) . "'.");
+        }
+        /** @var \Drupal\media\MediaTypeInterface|null $media_type */
+        $media_type = $this->entityTypeManager->getStorage('media_type')->load($bundle);
+        $source_definition = $media_type?->getSource()->getSourceFieldDefinition($media_type);
+        if ($media_type === NULL || $source_definition === NULL) {
+          throw new \RuntimeException("Media type '{$bundle}' has no configured source field.");
+        }
+        $source_field = $source_definition->getName();
+        $existing = $this->entityTypeManager->getStorage('media')->getQuery()
+          ->accessCheck(FALSE)
+          ->condition('bundle', $bundle)
+          ->condition($source_field . '.target_id', $file->id())
+          ->range(0, 1)
+          ->execute();
+        if ($existing) {
+          $this->reportMedia($url, (int) reset($existing), $bundle, $file);
+          continue;
+        }
+        $title = trim((string) ($document['title'] ?? ''));
+        $media = $this->entityTypeManager->getStorage('media')->create([
+          'bundle' => $bundle,
+          'name' => $this->mediaName(['title' => $title], $url, $file),
+          'status' => 1,
+        ]);
+        $field_value = ['target_id' => $file->id()];
+        if ($source_definition->getType() === 'image') {
+          $field_value['alt'] = $this->truncateString($title !== '' ? $title : $file->getFilename(), 512);
+        }
+        elseif ($source_definition->getType() === 'file') {
+          $field_value['description'] = $this->truncateString($title, 255);
+        }
+        $media->set($source_field, $field_value);
+        $this->validateAndSaveMedia($media);
+        $this->reportMedia($url, (int) $media->id(), $bundle, $file);
+      }
+      catch (\Throwable $e) {
+        $warnings[] = "Linked document '{$url}' was not created: " . $e->getMessage();
+        $this->logger->warning('icms_mcp: linked document skipped: @msg', ['@msg' => $e->getMessage()]);
+      }
+    }
+    return $warnings;
   }
 
   /**
@@ -2380,17 +2543,36 @@ final class IcmsMcpOperations {
    * Download a URL once into public storage and return a managed file entity.
    */
   protected function downloadRemoteFile(string $url): \Drupal\file\FileInterface {
+    // Reuse by source URL first: the file may sit under a mirrored path or,
+    // for a URL with no usable path (a media route), under a hashed name only
+    // known once it was fetched. Either way the second import finds it here.
+    $registry = $this->state->get(self::FILE_REGISTRY_STATE_KEY, []);
+    $registry_key = hash('sha256', $url);
+    $file_storage = $this->entityTypeManager->getStorage('file');
+    if (isset($registry[$registry_key])) {
+      /** @var \Drupal\file\FileInterface|null $known */
+      $known = $file_storage->load((int) $registry[$registry_key]);
+      if ($known !== NULL && file_exists($known->getFileUri()) && filesize($known->getFileUri()) > 0) {
+        if (!$known->isPermanent()) {
+          $known->setPermanent();
+          $known->save();
+        }
+        return $known;
+      }
+    }
+
     $path = (string) parse_url($url, PHP_URL_PATH);
     $extension = $this->mediaExtensionFromPath($path);
-    $extension = preg_match('/^[a-z0-9]{1,8}$/', $extension) ? '.' . $extension : '';
-    $directory = 'public://icms_mcp';
-    $this->fileSystem->prepareDirectory(
-      $directory,
-      FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS,
-    );
-    $uri = $directory . '/' . hash('sha256', $url) . $extension;
+    // The source's own place under its files directory, so a document keeps
+    // its URL shape (`/sites/default/files/2023-07/Report.pdf`) and the
+    // media library shows real names instead of hashes.
+    $uri = LinkRewriter::mirroredFileUri($url);
+    if ($uri === NULL) {
+      $suffix = preg_match('/^[a-z0-9]{1,8}$/', $extension) ? '.' . $extension : '';
+      $uri = 'public://icms_mcp/' . hash('sha256', $url) . $suffix;
+    }
 
-    $existing = $this->entityTypeManager->getStorage('file')->loadByProperties(['uri' => $uri]);
+    $existing = $file_storage->loadByProperties(['uri' => $uri]);
     $file = $existing ? reset($existing) : NULL;
     if ($file !== NULL && file_exists($uri) && filesize($uri) > 0) {
       /** @var \Drupal\file\FileInterface $file */
@@ -2401,6 +2583,7 @@ final class IcmsMcpOperations {
         $file->setPermanent();
         $file->save();
       }
+      $this->rememberFile($registry_key, $file);
       return $file;
     }
 
@@ -2414,28 +2597,96 @@ final class IcmsMcpOperations {
     if ($data === '') {
       throw new \RuntimeException("Remote media '{$url}' returned an empty body.");
     }
+    // A media route or an extension-less URL: name the file from what the
+    // server said it sent (Content-Disposition, else Content-Type).
+    if ($extension === '' && !str_contains(basename($uri), '.')) {
+      $served = $this->servedFilename($response);
+      if ($served !== '') {
+        $uri = 'public://icms_mcp/' . hash('sha256', $url) . '.' . $served;
+      }
+    }
+    $directory = $this->fileSystem->dirname($uri);
+    $this->fileSystem->prepareDirectory(
+      $directory,
+      FileSystemInterface::CREATE_DIRECTORY | FileSystemInterface::MODIFY_PERMISSIONS,
+    );
     $saved_uri = $this->fileSystem->saveData($data, $uri, FileExists::Replace);
     if ($saved_uri === FALSE) {
       throw new \RuntimeException("Could not write remote media to '{$uri}'.");
     }
 
     // Reuse an existing managed file entity whose physical file was missing.
+    if ($file === NULL) {
+      $existing = $file_storage->loadByProperties(['uri' => $saved_uri]);
+      $file = $existing ? reset($existing) : NULL;
+    }
     if ($file !== NULL) {
       if (!$file->isPermanent()) {
         $file->setPermanent();
         $file->save();
       }
+      $this->rememberFile($registry_key, $file);
       return $file;
     }
 
     /** @var \Drupal\file\FileInterface $file */
-    $file = $this->entityTypeManager->getStorage('file')->create([
-      'filename' => $this->mediaName([], $url),
+    $file = $file_storage->create([
+      'filename' => basename($saved_uri) !== '' ? basename($saved_uri) : $this->mediaName([], $url),
       'uri' => $saved_uri,
       'status' => 1,
     ]);
     $file->save();
+    $this->rememberFile($registry_key, $file);
     return $file;
+  }
+
+  /**
+   * State key of the `{sha256(source url): fid}` registry of fetched files.
+   */
+  protected const FILE_REGISTRY_STATE_KEY = 'icms_mcp.files_by_source_url';
+
+  /**
+   * Remember which managed file a source URL was fetched into.
+   */
+  protected function rememberFile(string $registry_key, \Drupal\file\FileInterface $file): void {
+    $registry = $this->state->get(self::FILE_REGISTRY_STATE_KEY, []);
+    if (($registry[$registry_key] ?? NULL) !== (int) $file->id()) {
+      $registry[$registry_key] = (int) $file->id();
+      $this->state->set(self::FILE_REGISTRY_STATE_KEY, $registry);
+    }
+  }
+
+  /**
+   * The extension the server declared for a response body, or "".
+   */
+  protected function servedFilename(\Psr\Http\Message\ResponseInterface $response): string {
+    $disposition = $response->getHeaderLine('Content-Disposition');
+    if ($disposition !== '' && preg_match('/filename\*?=(?:UTF-8\'\')?"?([^";]+)"?/i', $disposition, $m)) {
+      $extension = strtolower((string) pathinfo(rawurldecode(trim($m[1])), PATHINFO_EXTENSION));
+      if (preg_match('/^[a-z0-9]{1,8}$/', $extension)) {
+        return $extension;
+      }
+    }
+    $type = strtolower(trim((string) explode(';', $response->getHeaderLine('Content-Type'))[0]));
+    $by_type = [
+      'application/pdf' => 'pdf',
+      'image/jpeg' => 'jpg',
+      'image/png' => 'png',
+      'image/gif' => 'gif',
+      'image/webp' => 'webp',
+      'image/svg+xml' => 'svg',
+      'application/msword' => 'doc',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
+      'application/vnd.ms-excel' => 'xls',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx',
+      'application/vnd.ms-powerpoint' => 'ppt',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation' => 'pptx',
+      'application/zip' => 'zip',
+      'text/csv' => 'csv',
+      'audio/mpeg' => 'mp3',
+      'video/mp4' => 'mp4',
+    ];
+    return $by_type[$type] ?? '';
   }
 
   /**
@@ -2739,6 +2990,197 @@ final class IcmsMcpOperations {
     }
     usort($indexed, fn($a, $b) => $a[0] === $b[0] ? $a[1] <=> $b[1] : $a[0] <=> $b[0]);
     return array_map(fn($t) => $t[2], $indexed);
+  }
+
+  // ---- Tool: rewrite_node_links --------------------------------------------
+
+  /**
+   * Rewrite links inside an imported node and its layout paragraphs.
+   *
+   * Every translation of the node and of each paragraph (recursively) is
+   * visited; `href="<from>"` in text fields and link-field uris matching
+   * `<from>` (see LinkRewriter::rewriteUri) become `<to>`. Entities are only
+   * saved when something changed, inside one transaction; a replacement that
+   * matched nothing is listed as unmatched.
+   */
+  protected function doRewriteNodeLinks(int $nid, array $replacements): array {
+    $rules = [];
+    foreach ($replacements as $replacement) {
+      if (!is_array($replacement)) {
+        continue;
+      }
+      $from = (string) ($replacement['from'] ?? '');
+      $to = (string) ($replacement['to'] ?? '');
+      if ($from !== '' && $to !== '' && $from !== $to) {
+        $rules[$from] = $to;
+      }
+    }
+    if ($nid <= 0) {
+      return ['status' => 'error', 'error' => 'A node id is required.'];
+    }
+    $node_storage = $this->entityTypeManager->getStorage('node');
+    $node_storage->resetCache([$nid]);
+    /** @var \Drupal\node\NodeInterface|null $node */
+    $node = $node_storage->load($nid);
+    if ($node === NULL) {
+      return ['status' => 'error', 'nid' => $nid, 'error' => "Node {$nid} does not exist."];
+    }
+    if (!$rules) {
+      return ['status' => 'ok', 'nid' => $nid, 'replaced' => 0, 'paragraphs_touched' => 0, 'unmatched' => []];
+    }
+
+    $matched = array_fill_keys(array_keys($rules), 0);
+    $replaced = 0;
+    $paragraphs_touched = 0;
+    $transaction = $this->database->startTransaction('icms_mcp_rewrite_links');
+    try {
+      $this->rewriteEntityLinks($node, $rules, $matched, $replaced);
+      $layouts_field = $this->layoutsFieldName();
+      $seen = [];
+      foreach ($this->paragraphsUnder($node, $layouts_field, 0) as $paragraph) {
+        $id = (int) $paragraph->id();
+        if (isset($seen[$id])) {
+          continue;
+        }
+        $seen[$id] = TRUE;
+        $before = $replaced;
+        $this->rewriteEntityLinks($paragraph, $rules, $matched, $replaced);
+        if ($replaced > $before) {
+          $paragraphs_touched++;
+        }
+      }
+    }
+    catch (\Throwable $e) {
+      $transaction->rollBack();
+      $this->logger->error('icms_mcp:rewrite_node_links rolled back: @msg', ['@msg' => $e->getMessage()]);
+      return ['status' => 'error', 'nid' => $nid, 'error' => $e->getMessage()];
+    }
+    return [
+      'status' => 'ok',
+      'nid' => $nid,
+      'replaced' => $replaced,
+      'paragraphs_touched' => $paragraphs_touched,
+      'unmatched' => array_values(array_keys(array_filter($matched, fn(int $count): bool => $count === 0))),
+    ];
+  }
+
+  /**
+   * Every paragraph under an entity's paragraph reference fields, recursively.
+   *
+   * @return \Drupal\paragraphs\ParagraphInterface[]
+   */
+  protected function paragraphsUnder(\Drupal\Core\Entity\FieldableEntityInterface $entity, string $preferred_field, int $depth): array {
+    if ($depth > 8) {
+      return [];
+    }
+    $out = [];
+    foreach ($entity->getFieldDefinitions() as $name => $definition) {
+      if ($definition->getType() !== 'entity_reference_revisions' || (string) ($definition->getSetting('target_type') ?? '') !== 'paragraph') {
+        continue;
+      }
+      foreach ($entity->get($name) as $item) {
+        $child = $item->entity ?? NULL;
+        if ($child instanceof \Drupal\paragraphs\ParagraphInterface) {
+          $out[] = $child;
+          foreach ($this->paragraphsUnder($child, $preferred_field, $depth + 1) as $grandchild) {
+            $out[] = $grandchild;
+          }
+        }
+      }
+    }
+    return $out;
+  }
+
+  /**
+   * Apply the replacement rules to every translation of one entity.
+   */
+  protected function rewriteEntityLinks(
+    \Drupal\Core\Entity\ContentEntityInterface $entity,
+    array $rules,
+    array &$matched,
+    int &$replaced,
+  ): void {
+    foreach ($entity->getTranslationLanguages() as $langcode => $language) {
+      $translation = $entity->getTranslation($langcode);
+      $changed = FALSE;
+      foreach ($translation->getFieldDefinitions() as $name => $definition) {
+        $type = $definition->getType();
+        if (in_array($type, ['text', 'text_long', 'text_with_summary', 'string_long', 'string'], TRUE)) {
+          $items = $translation->get($name)->getValue();
+          $touched = FALSE;
+          foreach ($items as $index => $item) {
+            foreach (['value', 'summary'] as $property) {
+              if (!isset($item[$property]) || !is_string($item[$property]) || !str_contains($item[$property], 'href')) {
+                continue;
+              }
+              foreach ($rules as $from => $to) {
+                [$item[$property], $count] = LinkRewriter::rewriteText($item[$property], (string) $from, $to);
+                if ($count > 0) {
+                  $matched[$from] += $count;
+                  $replaced += $count;
+                  $touched = TRUE;
+                }
+              }
+            }
+            $items[$index] = $item;
+          }
+          if ($touched) {
+            $translation->set($name, $items);
+            $changed = TRUE;
+          }
+        }
+        elseif ($type === 'link') {
+          $items = $translation->get($name)->getValue();
+          $touched = FALSE;
+          foreach ($items as $index => $item) {
+            $uri = (string) ($item['uri'] ?? '');
+            foreach ($rules as $from => $to) {
+              $rewritten = LinkRewriter::rewriteUri($uri, (string) $from, $to);
+              if ($rewritten !== NULL) {
+                $items[$index]['uri'] = $rewritten;
+                $uri = $rewritten;
+                $matched[$from]++;
+                $replaced++;
+                $touched = TRUE;
+              }
+            }
+          }
+          if ($touched) {
+            $translation->set($name, $items);
+            $changed = TRUE;
+          }
+        }
+      }
+      if ($changed) {
+        $translation->save();
+      }
+    }
+  }
+
+  // ---- Tool: set_front_page ------------------------------------------------
+
+  /**
+   * Make an imported node the site's front page.
+   */
+  protected function doSetFrontPage(int $nid): array {
+    if ($nid <= 0) {
+      return ['status' => 'error', 'error' => 'A node id is required.'];
+    }
+    /** @var \Drupal\node\NodeInterface|null $node */
+    $node = $this->entityTypeManager->getStorage('node')->load($nid);
+    if ($node === NULL) {
+      return ['status' => 'error', 'nid' => $nid, 'error' => "Node {$nid} does not exist."];
+    }
+    if (!$node->isPublished()) {
+      return ['status' => 'error', 'nid' => $nid, 'error' => "Node {$nid} is not published; the front page must be."];
+    }
+    $config = \Drupal::configFactory()->getEditable('system.site');
+    $previous = (string) $config->get('page.front');
+    $current = '/node/' . $nid;
+    if ($previous !== $current) {
+      $config->set('page.front', $current)->save();
+    }
+    return ['status' => 'ok', 'nid' => $nid, 'previous' => $previous, 'current' => $current];
   }
 
   // ---- Tool: lookup_existing_node ------------------------------------------
