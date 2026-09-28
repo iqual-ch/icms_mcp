@@ -5,7 +5,7 @@ case, the iqual `drupal-bridge` ADK agent on Cloud Run).
 
 ## What it ships
 
-Seven tools. On the wire the names become `icms-mcp_<sanitized-tool-name>`
+Nine tools. On the wire the names become `icms-mcp_<sanitized-tool-name>`
 (drupal/mcp prepends the plugin id and `_`; note the hyphen — see
 "Plugin ID gotcha" below):
 
@@ -19,6 +19,18 @@ Seven tools. On the wire the names become `icms-mcp_<sanitized-tool-name>`
 | `icms-mcp_import_taxonomy_terms`  | Upsert one vocabulary's terms (uuid/name identity, hierarchy, translations). Step 3, before nodes. |
 | `icms-mcp_import_menu_links`      | Upsert one menu's links, parents before children; node links resolve via the source-key field, and a parent whose page is missing is kept disabled so its children keep their place. Step 3, after nodes. |
 | `icms-mcp_lookup_existing_node`   | Idempotency lookup by canonical source URL (matches against the configured source-key field). |
+| `icms-mcp_rewrite_node_links`     | Post-import pass: `{from, to}` replacements applied to `href`s in text fields and link-field uris (exact, or by resolved `#fragment`) on the node, its translations and its paragraphs. Anchors → `#<paragraph id>`, document links → the stored file's URL. |
+| `icms-mcp_set_front_page`         | Make an imported, published node the site front page (`system.site page.front`). |
+
+`import_pivot` also reports what it created: `paragraphs [{sequence, id, revision_id}]`
+(top-level layout paragraphs) and `media [{sourceUrl, mediaId, bundle, fileUrl}]` (every
+media resolved, translations included), which the migrator's post-import link pass
+consumes. Remote files are stored under the source's own path when it is under a
+Drupal files directory (`public://2023-07/Report.pdf`), else under
+`public://icms_mcp/<sha256>.<ext>` (a media route's extension comes from the
+response), and reused by source URL on re-runs. `pivot.target.linkedDocuments
+[{src, title}]` — files only linked from text — are created as unplaced document
+media. A translation's paragraph `status` is applied per language.
 
 The catalog also carries `editorTextStyles`: per text format, the CKEditor 5 style
 plugin's styles (label, tag, classes) and the classes the format allows on text tags —
