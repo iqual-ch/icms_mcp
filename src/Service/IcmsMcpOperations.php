@@ -96,6 +96,13 @@ final class IcmsMcpOperations {
    */
   protected int $paragraphStatusApplied = 0;
 
+  /**
+   * Per-language paragraph publication states the target could not apply
+   * because `status` is not translatable on the bundle (see
+   * translateParagraphRecursive).
+   */
+  protected int $paragraphStatusSkipped = 0;
+
   public function __construct(
     protected EntityTypeManagerInterface $entityTypeManager,
     protected EntityTypeBundleInfoInterface $bundleInfo,
@@ -192,6 +199,20 @@ final class IcmsMcpOperations {
       }
       if ($toolId === 'set_front_page' || $toolId === md5('set_front_page')) {
         return $this->doSetFrontPage((int) ($arguments['nid'] ?? 0));
+      }
+      if ($toolId === 'update_node_references' || $toolId === md5('update_node_references')) {
+        return $this->doUpdateNodeReferences(
+          (int) ($arguments['nid'] ?? 0),
+          is_array($arguments['updates'] ?? NULL) ? $arguments['updates'] : [],
+        );
+      }
+      if ($toolId === 'read_node' || $toolId === md5('read_node')) {
+        return $this->doReadNode(
+          (int) ($arguments['nid'] ?? 0),
+          is_array($arguments['langcodes'] ?? NULL) ? $arguments['langcodes'] : [],
+          is_array($arguments['fields'] ?? NULL) ? $arguments['fields'] : [],
+          (bool) ($arguments['include_paragraphs'] ?? TRUE),
+        );
       }
     }
     catch (\Throwable $e) {
@@ -656,6 +677,7 @@ final class IcmsMcpOperations {
     $this->paragraphReport = [];
     $this->mediaReport = [];
     $this->paragraphStatusApplied = 0;
+    $this->paragraphStatusSkipped = 0;
     $transaction = $this->database->startTransaction('icms_mcp_import');
     try {
       $result = $this->writeNodeAndParagraphs(
@@ -689,6 +711,9 @@ final class IcmsMcpOperations {
       $result['media'] = array_values($this->mediaReport);
       if ($this->paragraphStatusApplied > 0) {
         $result['paragraph_status_applied'] = $this->paragraphStatusApplied;
+      }
+      if ($this->paragraphStatusSkipped > 0) {
+        $result['paragraph_status_skipped'] = $this->paragraphStatusSkipped;
       }
       $result['idempotence_key'] = $idempotence_key;
       $result['strategy'] = $strategy;
@@ -811,6 +836,10 @@ final class IcmsMcpOperations {
           'sequence' => (int) ($para['sequence'] ?? $index),
           'id' => (int) $entity->id(),
           'revision_id' => (int) $entity->getRevisionId(),
+          // What the paragraph actually holds, per child field: lets the
+          // migrator name a child the target dropped instead of losing the
+          // whole translation over an unexplained count mismatch.
+          'children' => $this->paragraphChildCounts($entity),
         ];
       }
       $node->set($this->layoutsFieldName(), $created_paragraphs);
@@ -1685,8 +1714,11 @@ final class IcmsMcpOperations {
       $paragraphs_translated = FALSE;
       $paragraphs_mode = 'shared';
       $symmetric_reason = NULL;
+      $structure_partial = [];
       $untranslated_fields = [];
       $old_ref_ids = [];
+      $status_applied_before = $this->paragraphStatusApplied;
+      $status_skipped_before = $this->paragraphStatusSkipped;
       $field_definition = $translation->hasField($layouts_field)
         ? $translation->getFieldDefinition($layouts_field)
         : NULL;
@@ -1739,7 +1771,7 @@ final class IcmsMcpOperations {
         try {
           $shared = $this->loadSharedParagraphs($node, $layouts_field);
           $specs = $this->sortParagraphsBySequence($paragraph_specs);
-          $symmetric_reason = $this->verifySharedParagraphStructure($shared, $specs);
+          $symmetric_reason = $this->verifySharedParagraphStructure($shared, $specs, 0, $structure_partial);
           if ($symmetric_reason === NULL) {
             foreach ($specs as $index => $para) {
               $para_fields = $para['attributes'] ?? $para['fields'] ?? [];
@@ -1800,6 +1832,22 @@ final class IcmsMcpOperations {
         // step-2 setup work (mark them translatable), not a migration error.
         $entry['untranslated_fields'] = array_values(array_unique($untranslated_fields));
       }
+      if ($structure_partial) {
+        // Child paragraphs the translation named but the target does not
+        // hold (or the reverse): translated by position as far as both go,
+        // the difference reported here rather than withholding the language.
+        $entry['structure_partial'] = $structure_partial;
+      }
+      // Per language, so the migrator can say which translation's paragraph
+      // states landed and which the target could not keep apart.
+      $status_applied = $this->paragraphStatusApplied - $status_applied_before;
+      $status_skipped = $this->paragraphStatusSkipped - $status_skipped_before;
+      if ($status_applied > 0) {
+        $entry['paragraph_status_applied'] = $status_applied;
+      }
+      if ($status_skipped > 0) {
+        $entry['paragraph_status_skipped'] = $status_skipped;
+      }
       $summary[] = $entry;
     }
 
@@ -1831,16 +1879,30 @@ final class IcmsMcpOperations {
    * never ends up with answers attached to the wrong questions. Returns NULL
    * on a full match, otherwise a human-readable mismatch description.
    */
-  protected function verifySharedParagraphStructure(array $entities, array $specs, int $depth = 0): ?string {
+  protected function verifySharedParagraphStructure(array $entities, array $specs, int $depth = 0, array &$partial = []): ?string {
     if ($depth > 8) {
       return 'paragraph nesting exceeds the supported depth of 8';
     }
     if (count($entities) !== count($specs)) {
-      return sprintf('%d paragraphs on the target, %d in the translation', count($entities), count($specs));
+      if ($depth === 0) {
+        return sprintf('%d paragraphs on the target, %d in the translation', count($entities), count($specs));
+      }
+      // Child level: a media the target could not resolve, an item an editor
+      // removed — the paragraphs that exist on both sides still pair by
+      // position. Recorded, not fatal: refusing here kept whole pages in the
+      // default language over one missing logo.
+      $partial[] = [
+        'depth' => $depth,
+        'target_count' => count($entities),
+        'translation_count' => count($specs),
+      ];
     }
     foreach (array_values($specs) as $index => $spec) {
       if (!is_array($spec)) {
         return sprintf('position %d: translation paragraph is not an object', $index);
+      }
+      if (!isset($entities[$index])) {
+        break;
       }
       $entity = $entities[$index];
       $bundle = $this->stripJsonApiPrefix((string) ($spec['type'] ?? ''));
@@ -1865,9 +1927,13 @@ final class IcmsMcpOperations {
             $child_entities[] = $item->entity;
           }
         }
-        $mismatch = $this->verifySharedParagraphStructure($child_entities, $this->normalizeList($value), $depth + 1);
+        $child_partial = [];
+        $mismatch = $this->verifySharedParagraphStructure($child_entities, $this->normalizeList($value), $depth + 1, $child_partial);
         if ($mismatch !== NULL) {
           return sprintf('position %d, field %s: %s', $index, $name, $mismatch);
+        }
+        foreach ($child_partial as $item) {
+          $partial[] = $item + ['position' => $index, 'field' => $name];
         }
       }
     }
@@ -1904,8 +1970,17 @@ final class IcmsMcpOperations {
     // the source left unpublished in French only has to be sent as such.
     // Absent means published, as on the default-language path.
     if ($status !== NULL) {
-      $translation->setPublished($status);
-      $this->paragraphStatusApplied++;
+      $status_definition = $translation->hasField('status') ? $translation->getFieldDefinition('status') : NULL;
+      if ($status_definition !== NULL && $status_definition->isTranslatable()) {
+        $translation->setPublished($status);
+        $this->paragraphStatusApplied++;
+      }
+      else {
+        // Shared across languages on this bundle: setting it here would
+        // silently unpublish (or publish) every language. Reported instead.
+        $this->paragraphStatusSkipped++;
+        $untranslated_fields[] = 'status';
+      }
     }
     foreach ($fields as $name => $value) {
       if (!$translation->hasField($name)) {
@@ -3155,6 +3230,283 @@ final class IcmsMcpOperations {
         $translation->save();
       }
     }
+  }
+
+  /**
+   * Direct child paragraph counts per paragraph-reference field.
+   *
+   * @return array<string, int>
+   */
+  protected function paragraphChildCounts(\Drupal\Core\Entity\FieldableEntityInterface $entity): array {
+    $counts = [];
+    foreach ($entity->getFieldDefinitions() as $name => $definition) {
+      if ($definition->getType() !== 'entity_reference_revisions' || (string) ($definition->getSetting('target_type') ?? '') !== 'paragraph') {
+        continue;
+      }
+      $count = 0;
+      foreach ($entity->get($name) as $item) {
+        if ((int) ($item->target_id ?? 0) > 0) {
+          $count++;
+        }
+      }
+      if ($count > 0) {
+        $counts[$name] = $count;
+      }
+    }
+    return $counts;
+  }
+
+  // ---- Tool: update_node_references ----------------------------------------
+
+  /**
+   * Path-addressed write of reference and link fields on an imported node.
+   *
+   * The migrator resolves references against the nodes it has imported so
+   * far; a page imported before the pages it references (a section overview
+   * before its children) keeps source paths. Re-importing would recreate
+   * the paragraphs (and break already-rewritten anchors), so the final pass
+   * writes exactly the fields that changed, where they are:
+   *
+   *   {langcode?, path: [{field?, index}], expect_bundle?, field, value}
+   *
+   * `path` walks from the node into paragraphs (a step without `field` uses
+   * the layouts field); an empty path addresses the node itself. Only
+   * `entity_reference` and `link` fields are written, only when the value
+   * differs, in one transaction. Idempotent.
+   */
+  protected function doUpdateNodeReferences(int $nid, array $updates): array {
+    if ($nid <= 0) {
+      return ['status' => 'error', 'error' => 'A node id is required.'];
+    }
+    $node_storage = $this->entityTypeManager->getStorage('node');
+    $node_storage->resetCache([$nid]);
+    /** @var \Drupal\node\NodeInterface|null $node */
+    $node = $node_storage->load($nid);
+    if ($node === NULL) {
+      return ['status' => 'error', 'nid' => $nid, 'error' => "Node {$nid} does not exist."];
+    }
+    $applied = 0;
+    $unchanged = 0;
+    $rejected = [];
+    $unmatched = [];
+    $touched = [];
+    $media_count = 0;
+    $transaction = $this->database->startTransaction('icms_mcp_update_references');
+    try {
+      foreach (array_values($updates) as $position => $update) {
+        if (!is_array($update) || (string) ($update['field'] ?? '') === '') {
+          $rejected[] = ['index' => $position, 'reason' => 'an update needs a field name'];
+          continue;
+        }
+        $field = (string) $update['field'];
+        $langcode = (string) ($update['langcode'] ?? '');
+        $path = is_array($update['path'] ?? NULL) ? $update['path'] : [];
+        $entity = $this->entityAtPath($node, $path);
+        if ($entity === NULL) {
+          $unmatched[] = ['index' => $position, 'field' => $field, 'path' => $path];
+          continue;
+        }
+        $expect_bundle = $this->stripJsonApiPrefix((string) ($update['expect_bundle'] ?? ''));
+        if ($expect_bundle !== '' && $entity->bundle() !== $expect_bundle) {
+          $rejected[] = [
+            'index' => $position,
+            'reason' => sprintf("bundle '%s' at the path, '%s' expected", $entity->bundle(), $expect_bundle),
+          ];
+          continue;
+        }
+        if (!$entity->hasField($field)) {
+          $rejected[] = ['index' => $position, 'reason' => sprintf("field '%s' does not exist on %s:%s", $field, $entity->getEntityTypeId(), $entity->bundle())];
+          continue;
+        }
+        $definition = $entity->getFieldDefinition($field);
+        $type = $definition->getType();
+        if ($type !== 'entity_reference' && $type !== 'link') {
+          $rejected[] = ['index' => $position, 'reason' => sprintf("field '%s' is a %s field; only entity_reference and link fields are written here", $field, $type)];
+          continue;
+        }
+        $target = $entity;
+        if ($langcode !== '' && $langcode !== $entity->language()->getId()) {
+          if (!$entity->hasTranslation($langcode)) {
+            $rejected[] = ['index' => $position, 'reason' => sprintf("no '%s' translation at the path", $langcode)];
+            continue;
+          }
+          $target = $definition->isTranslatable() ? $entity->getTranslation($langcode) : $entity;
+        }
+        $before = $this->comparableFieldValue($target->get($field)->getValue());
+        $this->setEntityField($target, $field, $update['value'] ?? NULL, $media_count);
+        $after = $this->comparableFieldValue($target->get($field)->getValue());
+        if ($before === $after) {
+          $unchanged++;
+          continue;
+        }
+        $target->save();
+        $applied++;
+        $touched[$target->getEntityTypeId() . ':' . $target->id() . ':' . $target->language()->getId()] = TRUE;
+      }
+    }
+    catch (\Throwable $e) {
+      $transaction->rollBack();
+      $this->logger->error('icms_mcp:update_node_references rolled back: @msg', ['@msg' => $e->getMessage()]);
+      return ['status' => 'error', 'nid' => $nid, 'error' => $e->getMessage()];
+    }
+    return [
+      'status' => 'ok',
+      'nid' => $nid,
+      'applied' => $applied,
+      'entities_touched' => count($touched),
+      'unchanged' => $unchanged,
+      'rejected' => $rejected,
+      'unmatched' => $unmatched,
+    ];
+  }
+
+  /**
+   * The entity a `[{field?, index}]` path addresses, from the node down.
+   */
+  protected function entityAtPath(\Drupal\Core\Entity\FieldableEntityInterface $root, array $path): ?\Drupal\Core\Entity\FieldableEntityInterface {
+    $entity = $root;
+    foreach ($path as $step) {
+      if (!is_array($step)) {
+        return NULL;
+      }
+      $field = (string) ($step['field'] ?? '');
+      if ($field === '') {
+        $field = $this->layoutsFieldName();
+      }
+      $index = (int) ($step['index'] ?? -1);
+      if ($index < 0 || !$entity->hasField($field)) {
+        return NULL;
+      }
+      $definition = $entity->getFieldDefinition($field);
+      if ($definition->getType() !== 'entity_reference_revisions' || (string) ($definition->getSetting('target_type') ?? '') !== 'paragraph') {
+        return NULL;
+      }
+      $children = [];
+      foreach ($entity->get($field) as $item) {
+        $child = $item->entity ?? NULL;
+        if ($child instanceof \Drupal\paragraphs\ParagraphInterface) {
+          $children[] = $child;
+        }
+      }
+      if (!isset($children[$index])) {
+        return NULL;
+      }
+      $entity = $children[$index];
+    }
+    return $entity;
+  }
+
+  /**
+   * A field value reduced to what identifies it, for change detection.
+   */
+  protected function comparableFieldValue(array $items): array {
+    $out = [];
+    foreach ($items as $item) {
+      if (!is_array($item)) {
+        $out[] = $item;
+        continue;
+      }
+      $keep = [];
+      foreach (['target_id', 'uri', 'title', 'value'] as $key) {
+        if (array_key_exists($key, $item)) {
+          $keep[$key] = is_numeric($item[$key]) ? (string) $item[$key] : $item[$key];
+        }
+      }
+      $out[] = $keep ?: $item;
+    }
+    return $out;
+  }
+
+  // ---- Tool: read_node -----------------------------------------------------
+
+  /**
+   * Read back an imported node the way the migrator wrote it.
+   *
+   * Per language: publication state, title, path alias, the node's fields
+   * (all configurable ones, or the `fields` asked for) and the paragraph tree
+   * with each paragraph's translated state and status, so what landed can be
+   * checked against what was sent without a public page that hides it.
+   */
+  protected function doReadNode(int $nid, array $langcodes, array $fields, bool $include_paragraphs): array {
+    if ($nid <= 0) {
+      return ['status' => 'error', 'error' => 'A node id is required.'];
+    }
+    $node_storage = $this->entityTypeManager->getStorage('node');
+    $node_storage->resetCache([$nid]);
+    /** @var \Drupal\node\NodeInterface|null $node */
+    $node = $node_storage->load($nid);
+    if ($node === NULL) {
+      return ['status' => 'error', 'nid' => $nid, 'error' => "Node {$nid} does not exist."];
+    }
+    $wanted = array_values(array_filter(array_map('strval', $langcodes)));
+    $field_filter = array_values(array_filter(array_map('strval', $fields)));
+    $alias_manager = \Drupal::hasService('path_alias.manager') ? \Drupal::service('path_alias.manager') : NULL;
+    $translations = [];
+    foreach ($node->getTranslationLanguages() as $langcode => $language) {
+      if ($wanted && !in_array($langcode, $wanted, TRUE)) {
+        continue;
+      }
+      $translation = $node->getTranslation($langcode);
+      $entry = [
+        'langcode' => $langcode,
+        'status' => $translation->isPublished(),
+        'title' => $translation->getTitle(),
+        'path_alias' => $alias_manager !== NULL ? (string) $alias_manager->getAliasByPath('/node/' . $nid, $langcode) : '',
+        'fields' => FieldValueReader::readFields($translation, $field_filter),
+      ];
+      if ($include_paragraphs) {
+        $entry['paragraphs'] = $this->readParagraphs($translation, $this->layoutsFieldName(), $langcode, 0);
+      }
+      $translations[$langcode] = $entry;
+    }
+    return [
+      'status' => 'ok',
+      'nid' => $nid,
+      'bundle' => $node->bundle(),
+      'default_langcode' => $node->getUntranslated()->language()->getId(),
+      'translations' => $translations,
+    ];
+  }
+
+  /**
+   * The paragraph tree under one field of an entity, as read in `langcode`.
+   */
+  protected function readParagraphs(\Drupal\Core\Entity\FieldableEntityInterface $entity, string $field, string $langcode, int $depth): array {
+    if ($depth > 8 || !$entity->hasField($field)) {
+      return [];
+    }
+    $out = [];
+    $sequence = 0;
+    foreach ($entity->get($field) as $item) {
+      $paragraph = $item->entity ?? NULL;
+      if (!$paragraph instanceof \Drupal\paragraphs\ParagraphInterface) {
+        continue;
+      }
+      $translated = $paragraph->hasTranslation($langcode);
+      $view = $translated ? $paragraph->getTranslation($langcode) : $paragraph;
+      $row = [
+        'id' => (int) $paragraph->id(),
+        'sequence' => $sequence++,
+        'bundle' => $paragraph->bundle(),
+        'translated' => $translated,
+        'status' => $view->isPublished(),
+        'fields' => FieldValueReader::readFields($view, []),
+      ];
+      $children = [];
+      foreach ($view->getFieldDefinitions() as $name => $definition) {
+        if ($definition->getType() === 'entity_reference_revisions' && (string) ($definition->getSetting('target_type') ?? '') === 'paragraph') {
+          $nested = $this->readParagraphs($view, $name, $langcode, $depth + 1);
+          if ($nested) {
+            $children[$name] = $nested;
+          }
+        }
+      }
+      if ($children) {
+        $row['children'] = $children;
+      }
+      $out[] = $row;
+    }
+    return $out;
   }
 
   // ---- Tool: set_front_page ------------------------------------------------

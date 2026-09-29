@@ -5,7 +5,7 @@ case, the iqual `drupal-bridge` ADK agent on Cloud Run).
 
 ## What it ships
 
-Nine tools. On the wire the names become `icms-mcp_<sanitized-tool-name>`
+Eleven tools. On the wire the names become `icms-mcp_<sanitized-tool-name>`
 (drupal/mcp prepends the plugin id and `_`; note the hyphen — see
 "Plugin ID gotcha" below):
 
@@ -21,8 +21,10 @@ Nine tools. On the wire the names become `icms-mcp_<sanitized-tool-name>`
 | `icms-mcp_lookup_existing_node`   | Idempotency lookup by canonical source URL (matches against the configured source-key field). |
 | `icms-mcp_rewrite_node_links`     | Post-import pass: `{from, to}` replacements applied to `href`s in text fields and link-field uris (exact, or by resolved `#fragment`) on the node, its translations and its paragraphs. Anchors → `#<paragraph id>`, document links → the stored file's URL. |
 | `icms-mcp_set_front_page`         | Make an imported, published node the site front page (`system.site page.front`). |
+| `icms-mcp_update_node_references` | Final reference pass: path-addressed write of `entity_reference` / `link` fields on the node or a (nested) paragraph (`{langcode?, path: [{field?, index}], expect_bundle?, field, value}`), translation-aware, saved only on change, one transaction, idempotent. Lets a page imported before the pages it references get its teasers and buttons without a re-import (which would recreate paragraph ids). |
+| `icms-mcp_read_node`              | Read back a node per language: `{status, title, path_alias, fields, paragraphs: [{id, sequence, bundle, translated, status, fields, children}]}`, references with their labels. For checking what landed against what was sent (job title, publication type, per-language paragraph status). |
 
-`import_pivot` also reports what it created: `paragraphs [{sequence, id, revision_id}]`
+`import_pivot` also reports what it created: `paragraphs [{sequence, id, revision_id, children: {field: count}}]`
 (top-level layout paragraphs) and `media [{sourceUrl, mediaId, bundle, fileUrl}]` (every
 media resolved, translations included), which the migrator's post-import link pass
 consumes. Remote files are stored under the source's own path when it is under a
