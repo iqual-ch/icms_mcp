@@ -88,6 +88,12 @@ final class FieldValueReader {
         $values[] = $entry;
         continue;
       }
+      if ($type === 'boolean') {
+        // A loaded boolean item holds the database string ("0" / "1"); a
+        // consumer comparing it as a value would read "0" as set.
+        $values[] = (bool) ($raw['value'] ?? FALSE);
+        continue;
+      }
       if (array_key_exists('value', $raw) && count($raw) === 1) {
         $values[] = $raw['value'];
         continue;
