@@ -86,8 +86,9 @@ final class IcmsMcpOperations {
 
   /**
    * Media resolved by the running import (default language and translations):
-   * `{sourceUrl, mediaId, bundle, fileUrl}`, keyed by source URL. A document
-   * link in text is rewritten to `fileUrl` by the post-import pass.
+   * `{sourceUrl, mediaId, bundle, fileUrl, fileUrlAbsolute}`, keyed by source
+   * URL. `fileUrl` is root-relative; a document link in text is rewritten to
+   * it by the post-import pass.
    */
   protected array $mediaReport = [];
 
@@ -2302,6 +2303,7 @@ final class IcmsMcpOperations {
         ->execute();
       if ($existing_media) {
         $media_id = (int) reset($existing_media);
+        $this->captionExistingMedia($media_id, $value);
         $this->reportMedia($url, $media_id, $bundle, NULL);
         return $media_id;
       }
@@ -2311,6 +2313,7 @@ final class IcmsMcpOperations {
         'status' => 1,
       ]);
       $media->set($source_field, $source_type === 'link' ? ['uri' => $url] : $url);
+      $this->applyMediaCaption($media, $value);
       $this->validateAndSaveMedia($media);
       $this->reportMedia($url, (int) $media->id(), $bundle, NULL);
       return (int) $media->id();
@@ -2331,6 +2334,7 @@ final class IcmsMcpOperations {
       ->execute();
     if ($existing_media) {
       $media_id = (int) reset($existing_media);
+      $this->captionExistingMedia($media_id, $value);
       $this->reportMedia($url, $media_id, $bundle, $file);
       return $media_id;
     }
@@ -2353,9 +2357,55 @@ final class IcmsMcpOperations {
       );
     }
     $media->set($source_field, $field_value);
+    $this->applyMediaCaption($media, $value);
     $this->validateAndSaveMedia($media);
     $this->reportMedia($url, (int) $media->id(), $bundle, $file);
     return (int) $media->id();
+  }
+
+  /**
+   * Write a media descriptor's `caption` into the media's caption field.
+   *
+   * The caption belongs to the media (ICMS media types carry
+   * `field_caption`), so a site whose node keeps its image caption in a
+   * separate text field still shows it wherever the media is rendered.
+   * Nothing is written when the media type has no caption field, when the
+   * descriptor carries none, or when the media already has one (a media
+   * reused by several pages keeps the first caption it was given).
+   *
+   * @return bool
+   *   Whether the caption field was set.
+   */
+  protected function applyMediaCaption(\Drupal\media\MediaInterface $media, array $value): bool {
+    $caption = trim((string) ($value['caption'] ?? ''));
+    if ($caption === '' || !$media->hasField('field_caption') || !$media->get('field_caption')->isEmpty()) {
+      return FALSE;
+    }
+    $definition = $media->getFieldDefinition('field_caption');
+    if (in_array($definition->getType(), ['string', 'string_long'], TRUE)) {
+      $caption = trim(html_entity_decode(strip_tags($caption), ENT_QUOTES | ENT_HTML5));
+      $caption = $definition->getType() === 'string'
+        ? $this->truncateString($caption, (int) ($definition->getSetting('max_length') ?? 255))
+        : $caption;
+      $media->set('field_caption', $caption);
+    }
+    else {
+      $media->set('field_caption', $this->normalizeFieldValue($definition, $caption));
+    }
+    return TRUE;
+  }
+
+  /**
+   * Caption a media the import reuses, when it has no caption yet.
+   */
+  protected function captionExistingMedia(int $media_id, array $value): void {
+    if (trim((string) ($value['caption'] ?? '')) === '') {
+      return;
+    }
+    $media = $this->entityTypeManager->getStorage('media')->load($media_id);
+    if ($media instanceof \Drupal\media\MediaInterface && $this->applyMediaCaption($media, $value)) {
+      $this->validateAndSaveMedia($media);
+    }
   }
 
   /**
@@ -2363,16 +2413,20 @@ final class IcmsMcpOperations {
    */
   protected function reportMedia(string $source_url, int $media_id, string $bundle, ?\Drupal\file\FileInterface $file): void {
     $file_url = NULL;
+    $file_url_absolute = NULL;
     if ($file !== NULL) {
-      $file_url = $this->fileUrlGenerator !== NULL
-        ? $this->fileUrlGenerator->generateAbsoluteString($file->getFileUri())
-        : \Drupal::service('file_url_generator')->generateAbsoluteString($file->getFileUri());
+      $generator = $this->fileUrlGenerator ?? \Drupal::service('file_url_generator');
+      // Root-relative: the URL is written into content, which must keep
+      // working when the site moves to another host (preview → production).
+      $file_url = $generator->generateString($file->getFileUri());
+      $file_url_absolute = $generator->generateAbsoluteString($file->getFileUri());
     }
     $this->mediaReport[$source_url] = [
       'sourceUrl' => $source_url,
       'mediaId' => $media_id,
       'bundle' => $bundle,
       'fileUrl' => $file_url,
+      'fileUrlAbsolute' => $file_url_absolute,
     ];
   }
 
@@ -3227,6 +3281,10 @@ final class IcmsMcpOperations {
         }
       }
       if ($changed) {
+        // A link rewrite is part of the import, not an edit: a syncing save
+        // keeps the `changed` time the import wrote (core's ChangedItem
+        // otherwise stamps the request time on any translation change).
+        $translation->setSyncing(TRUE);
         $translation->save();
       }
     }
@@ -3339,6 +3397,8 @@ final class IcmsMcpOperations {
           $unchanged++;
           continue;
         }
+        // Part of the import: keep the `changed` time it wrote.
+        $target->setSyncing(TRUE);
         $target->save();
         $applied++;
         $touched[$target->getEntityTypeId() . ':' . $target->id() . ':' . $target->language()->getId()] = TRUE;
