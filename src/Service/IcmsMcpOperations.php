@@ -72,6 +72,11 @@ final class IcmsMcpOperations {
   protected array $mediaWarnings = [];
 
   /**
+   * Path aliases of the current import that were not kept, as warnings.
+   */
+  protected array $aliasWarnings = [];
+
+  /**
    * Option warnings of the current import (validation's `unknown_option` /
    * `invalid_option_value`): reported with the result, never a refusal.
    */
@@ -695,8 +700,8 @@ final class IcmsMcpOperations {
         $result['translations'] = $this->writeTranslations((int) $result['nid'], $translations_spec);
         // Translations run after the node result was assembled and can skip
         // assets of their own.
-        if ($this->mediaWarnings) {
-          $result['warnings'] = array_merge($this->optionWarnings, $this->mediaWarnings);
+        if ($this->mediaWarnings || $this->aliasWarnings) {
+          $result['warnings'] = array_merge($this->optionWarnings, $this->mediaWarnings, $this->aliasWarnings);
           $result['media_skipped_count'] = count($this->mediaWarnings);
         }
       }
@@ -755,6 +760,7 @@ final class IcmsMcpOperations {
     array $redirects = [],
   ): array {
     $this->mediaWarnings = [];
+    $this->aliasWarnings = [];
     $node_storage = $this->entityTypeManager->getStorage('node');
     $paragraph_storage = $this->entityTypeManager->hasDefinition('paragraph')
       ? $this->entityTypeManager->getStorage('paragraph')
@@ -872,7 +878,7 @@ final class IcmsMcpOperations {
     if ($redirects) {
       $result['redirect_count'] = $redirect_count;
     }
-    $warnings = array_merge($this->optionWarnings, $this->mediaWarnings, $redirect_warnings);
+    $warnings = array_merge($this->optionWarnings, $this->mediaWarnings, $this->aliasWarnings, $redirect_warnings);
     if ($warnings) {
       $result['warnings'] = $warnings;
     }
@@ -917,6 +923,10 @@ final class IcmsMcpOperations {
       $langcode = trim((string) ($spec['langcode'] ?? '')) ?: 'und';
       $status = (int) ($spec['statusCode'] ?? $spec['status_code'] ?? 301) ?: 301;
       if ($source === '' || $source === $alias || isset($seen[$langcode . ':' . $source])) {
+        continue;
+      }
+      if (self::isSystemPath('/' . $source)) {
+        $warnings[] = sprintf("redirects: '/%s' (%s) not written: it is a system path and would capture this site's entity with that id.", $source, $langcode);
         continue;
       }
       $seen[$langcode . ':' . $source] = TRUE;
@@ -2848,7 +2858,9 @@ final class IcmsMcpOperations {
    * set, so the item is stamped to skip it.
    *
    * A blank alias leaves the target's own behaviour untouched — that is what
-   * a source front page (no path of its own) must do.
+   * a source front page (no path of its own) must do. So does a system path
+   * (`/node/985`): a source page without an alias is served under its own
+   * node id, and as an alias here it would capture this site's node 985.
    */
   protected function applyPathAlias(\Drupal\Core\Entity\FieldableEntityInterface $entity, string $alias): void {
     $alias = trim($alias);
@@ -2859,6 +2871,18 @@ final class IcmsMcpOperations {
     if ($alias === '/') {
       return;
     }
+    if (self::isSystemPath($alias)) {
+      $this->aliasWarnings[] = sprintf("path_alias: '%s' (%s) not kept: it is a system path; the target generates the alias.", $alias, $entity->language()->getId());
+      // A re-import hands the alias back to pathauto, which replaces one an
+      // earlier import kept.
+      $properties = $entity->getFieldDefinition('path')
+        ->getFieldStorageDefinition()
+        ->getPropertyNames();
+      if (in_array('pathauto', $properties, TRUE)) {
+        $entity->get('path')->pathauto = 1;
+      }
+      return;
+    }
     $value = ['alias' => $alias];
     $properties = $entity->getFieldDefinition('path')
       ->getFieldStorageDefinition()
@@ -2867,6 +2891,16 @@ final class IcmsMcpOperations {
       $value['pathauto'] = 0;
     }
     $entity->set('path', $value);
+  }
+
+  /**
+   * Whether a path is an entity's system path (`/node/985`).
+   *
+   * Such a path names an entity of this site, so it is never taken as an
+   * alias or a redirect source.
+   */
+  public static function isSystemPath(string $path): bool {
+    return (bool) preg_match('#^/(?:node|media|user|taxonomy/term)/\d+(?:/|$)#', $path);
   }
 
   /**
