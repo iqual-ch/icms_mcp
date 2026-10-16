@@ -1,28 +1,26 @@
 # icms_mcp — Drupal module
 
-Custom MCP plugin that exposes ICMS-specific tools to MCP clients (in our
+mcp_server tools that expose ICMS-specific operations to MCP clients (in our
 case, the iqual `drupal-bridge` ADK agent on Cloud Run).
 
 ## What it ships
 
-Eleven tools. On the wire the names become `icms-mcp_<sanitized-tool-name>`
-(drupal/mcp prepends the plugin id and `_`; note the hyphen — see
-"Plugin ID gotcha" below):
+Tools (`src/Plugin/mcp_server/Tool/`), advertised under their tool id:
 
 | Tool (wire name)                  | Purpose                                                                                  |
 | --------------------------------- | ---------------------------------------------------------------------------------------- |
-| `icms-mcp_get_icms_catalog`       | Compact normalized v2 manifest with hash, indexes, capabilities, descriptions, fields, options and existing taxonomy vocabularies. |
-| `icms-mcp_get_icms_component_contract` | Full contracts for selected node, paragraph or media bundles, optionally including paragraph children. |
-| `icms-mcp_get_frontend_theme_files` | Read-only: the Nuxt frontend's theme layer as it is on this target (`app.config.ts`, `theme/*.css`, `base/typography.css`, `utilities/utilities.css`, `project/*.css`, `tailwind.css`, `nuxt.config.ts`, `package.json`), from `<repo>/frontend` (`ICMS_MCP_FRONTEND_DIR` overrides), so a design handoff can be diffed against what the project already themes. |
-| `icms-mcp_validate_pivot`         | Drupal-side validation of an `icms-drupal-import-handoff-v1` pivot.                       |
-| `icms-mcp_import_pivot`           | Transactional create/update of node + paragraphs + translations. Honours `strategy` and HITL gate. |
-| `icms-mcp_import_taxonomy_terms`  | Upsert one vocabulary's terms (uuid/name identity, hierarchy, translations). Step 3, before nodes. |
-| `icms-mcp_import_menu_links`      | Upsert one menu's links, parents before children; node links resolve via the source-key field, and a parent whose page is missing is kept disabled so its children keep their place. Step 3, after nodes. |
-| `icms-mcp_lookup_existing_node`   | Idempotency lookup by canonical source URL (matches against the configured source-key field). |
-| `icms-mcp_rewrite_node_links`     | Post-import pass: `{from, to}` replacements applied to `href`s in text fields and link-field uris (exact, or by resolved `#fragment`) on the node, its translations and its paragraphs. Anchors → `#<paragraph id>`, document links → the stored file's URL. |
-| `icms-mcp_set_front_page`         | Make an imported, published node the site front page (`system.site page.front`). |
-| `icms-mcp_update_node_references` | Final reference pass: path-addressed write of `entity_reference` / `link` fields on the node or a (nested) paragraph (`{langcode?, path: [{field?, index}], expect_bundle?, field, value}`), translation-aware, saved only on change, one transaction, idempotent. Lets a page imported before the pages it references get its teasers and buttons without a re-import (which would recreate paragraph ids). |
-| `icms-mcp_read_node`              | Read back a node per language: `{status, title, path_alias, fields, paragraphs: [{id, sequence, bundle, translated, status, fields, children}]}`, references with their labels, booleans as `true`/`false`. For checking what landed against what was sent (job title, publication type, per-language paragraph status). |
+| `get_icms_catalog`       | Compact normalized v2 manifest with hash, indexes, capabilities, descriptions, fields, options and existing taxonomy vocabularies. |
+| `get_icms_component_contract` | Full contracts for selected node, paragraph or media bundles, optionally including paragraph children. |
+| `get_frontend_theme_files` | Read-only: the Nuxt frontend's theme layer as it is on this target (`app.config.ts`, `theme/*.css`, `base/typography.css`, `utilities/utilities.css`, `project/*.css`, `tailwind.css`, `nuxt.config.ts`, `package.json`), from `<repo>/frontend` (`ICMS_MCP_FRONTEND_DIR` overrides), so a design handoff can be diffed against what the project already themes. |
+| `validate_pivot`         | Drupal-side validation of an `icms-drupal-import-handoff-v1` pivot.                       |
+| `import_pivot`           | Transactional create/update of node + paragraphs + translations. Honours `strategy` and HITL gate. |
+| `import_taxonomy_terms`  | Upsert one vocabulary's terms (uuid/name identity, hierarchy, translations). Step 3, before nodes. |
+| `import_menu_links`      | Upsert one menu's links, parents before children; node links resolve via the source-key field, and a parent whose page is missing is kept disabled so its children keep their place. Step 3, after nodes. |
+| `lookup_existing_node`   | Idempotency lookup by canonical source URL (matches against the configured source-key field). |
+| `rewrite_node_links`     | Post-import pass: `{from, to}` replacements applied to `href`s in text fields and link-field uris (exact, or by resolved `#fragment`) on the node, its translations and its paragraphs. Anchors → `#<paragraph id>`, document links → the stored file's URL. |
+| `set_front_page`         | Make an imported, published node the site front page (`system.site page.front`). |
+| `update_node_references` | Final reference pass: path-addressed write of `entity_reference` / `link` fields on the node or a (nested) paragraph (`{langcode?, path: [{field?, index}], expect_bundle?, field, value}`), translation-aware, saved only on change, one transaction, idempotent. Lets a page imported before the pages it references get its teasers and buttons without a re-import (which would recreate paragraph ids). |
+| `read_node`              | Read back a node per language: `{status, title, path_alias, fields, paragraphs: [{id, sequence, bundle, translated, status, fields, children}]}`, references with their labels, booleans as `true`/`false`. For checking what landed against what was sent (job title, publication type, per-language paragraph status). |
 
 `import_pivot` also reports what it created: `paragraphs [{sequence, id, revision_id, children: {field: count}}]`
 (top-level layout paragraphs) and `media [{sourceUrl, mediaId, bundle, fileUrl, fileUrlAbsolute}]`
@@ -47,27 +45,6 @@ handoff's type scale still has to add.
 can be overridden through `icms_mcp.catalog_descriptions` and
 `icms_mcp.catalog_options`, and expose alter hooks documented in
 `icms_mcp.api.php`.
-
-### Plugin ID gotcha
-
-drupal/mcp's `McpPluginManager::getAvailablePlugins()` enforces
-`/^[a-zA-Z0-9-]+$/` on plugin IDs — **underscores are forbidden**. That's
-why the `#[Mcp]` attribute uses `id: 'icms-mcp'` (hyphen) even though the
-module name is `icms_mcp` (underscore, as Drupal requires). If you ever see
-`tools/list` silently drop your plugin, check
-`/admin/reports/dblog` for `InvalidArgumentException: "Plugin ID must be
-made of letters, numbers, and hyphens"`.
-
-### Wire perf gotcha
-
-drupal/mcp's bundled `drush` MCP plugin exposes ~230 tools and each one
-runs an access check that costs ~300–700ms in DDEV, which makes
-`tools/list` time out (~4 min wall-clock). Disable plugins you don't need:
-
-```bash
-ddev drush php:eval '$c=\Drupal::configFactory()->getEditable("mcp.settings"); $p=$c->get("plugins"); foreach (["drush","content","aif","jsonapi","tools","aia"] as $k) { $p[$k]["enabled"]=false; } $c->set("plugins",$p)->save();'
-ddev drush cr
-```
 
 ## Behaviour summary
 
@@ -179,19 +156,12 @@ The module ships a route subscriber that allows the `oauth2` authentication
 provider on `/mcp` (mcp_server's route declares `_auth: ['cookie']`, and an
 explicit `_auth` list excludes even global providers).
 
-## Legacy drupal/mcp endpoint (transition only)
-
-`src/Plugin/Mcp/IcmsMcp.php` keeps the old `/mcp/post` + basic-auth
-endpoint working on sites that still have `drupal/mcp` enabled. It shares
-the same operations service. It is removed together with the
-`drupal/mcp` composer requirement once the fleet has moved.
-
-## Why a plugin and not a custom REST/JSON:API endpoint?
+## Why MCP tools and not a custom REST/JSON:API endpoint?
 
 Reuse + provenance. Every MCP-enabled client (Claude Desktop / Cursor / the
-ADK `McpToolset`) discovers the tools automatically, the auth + RBAC layer
-comes from `drupal/mcp`, and we get the streamable-HTTP transport, schema
-validation, and permission gating for free.
+ADK `McpToolset`) discovers the tools automatically, the OAuth + RBAC layer
+comes from `drupal/mcp_server` and `simple_oauth`, and we get the
+streamable-HTTP transport, schema validation, and permission gating for free.
 
 ## Moving keys that were generated inside the project
 
