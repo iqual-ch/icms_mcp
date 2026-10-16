@@ -24,10 +24,10 @@ use Psr\Log\LoggerInterface;
 /**
  * ICMS MCP operations — catalog/validate/import/lookup business logic.
  *
- * Transport-agnostic: the mcp_server #[Tool] plugins (src/Plugin/mcp_server/Tool/) and
- * the legacy drupal/mcp plugin (src/Plugin/Mcp/, transition only) are thin
- * adapters over this service. execute() returns RAW result arrays — each
- * transport applies its own envelope.
+ * Transport-agnostic: the mcp_server #[Tool] plugins
+ * (src/Plugin/mcp_server/Tool/) are thin adapters over this service.
+ * execute() returns RAW result arrays — the transport applies its own
+ * envelope.
  *
  * Configurable site state (\Drupal::state()):
  *   - icms_mcp.source_key_field: defaults to `field_icms_source_key`.

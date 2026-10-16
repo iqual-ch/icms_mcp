@@ -37,11 +37,6 @@ function icms_mcp_install(): void {
   \Drupal::moduleHandler()->load('icms_mcp');
   icms_mcp_ensure_source_key_field();
   icms_mcp_ensure_service_account();
-  // Legacy drupal/mcp endpoint hardening — transition only, skipped once
-  // that module is gone.
-  if (\Drupal::moduleHandler()->moduleExists('mcp')) {
-    icms_mcp_configure_mcp_endpoint();
-  }
   $credentials = icms_mcp_ensure_oauth_client();
   if ($credentials !== NULL) {
     \Drupal::messenger()->addStatus(t(
@@ -59,9 +54,6 @@ function icms_mcp_install(): void {
  */
 function icms_mcp_uninstall(): void {
   icms_mcp_remove_service_account();
-  if (\Drupal::moduleHandler()->moduleExists('mcp')) {
-    icms_mcp_release_mcp_endpoint();
-  }
 }
 
 /**
@@ -83,18 +75,12 @@ function icms_mcp_update_10102(): string {
 }
 
 /**
- * Harden the legacy drupal/mcp endpoint (transition only).
+ * Formerly hardened the legacy drupal/mcp endpoint, now removed.
+ *
+ * Kept as a no-op so the schema version stays sequential.
  */
 function icms_mcp_update_10103(): string {
-  if (!\Drupal::moduleHandler()->moduleExists('mcp')) {
-    return 'Legacy drupal/mcp not installed — nothing to harden.';
-  }
-  \Drupal::service('module_installer')->install(['basic_auth']);
-  $changes = icms_mcp_configure_mcp_endpoint();
-  $summary = $changes
-    ? 'MCP endpoint configured: ' . implode('; ', $changes) . '.'
-    : 'MCP endpoint already in the enforced state.';
-  return $summary . ' Export config (drush cex) so the next config import keeps it.';
+  return 'The legacy drupal/mcp endpoint is no longer supported — nothing to do.';
 }
 
 /**

@@ -4,15 +4,15 @@ declare(strict_types=1);
 
 namespace Drupal\Tests\icms_mcp\Unit;
 
-use Drupal\icms_mcp\Plugin\Mcp\IcmsMcp;
+use Drupal\icms_mcp\Service\IcmsMcpOperations;
 use Drupal\Tests\UnitTestCase;
 
-/** @coversDefaultClass \Drupal\icms_mcp\Plugin\Mcp\IcmsMcp */
+/** @coversDefaultClass \Drupal\icms_mcp\Service\IcmsMcpOperations */
 final class IcmsMcpMediaNameTest extends UnitTestCase {
 
   /** @covers ::mediaName */
   public function testMediaNameIsLimitedWithoutChangingTheAltDescriptor(): void {
-    $class = new \ReflectionClass(IcmsMcp::class);
+    $class = new \ReflectionClass(IcmsMcpOperations::class);
     $plugin = $class->newInstanceWithoutConstructor();
     $method = $class->getMethod('mediaName');
     $method->setAccessible(TRUE);
@@ -27,7 +27,7 @@ final class IcmsMcpMediaNameTest extends UnitTestCase {
 
   /** @covers ::truncateString */
   public function testImagePropertyLimitsCanBeAppliedSafely(): void {
-    $class = new \ReflectionClass(IcmsMcp::class);
+    $class = new \ReflectionClass(IcmsMcpOperations::class);
     $plugin = $class->newInstanceWithoutConstructor();
     $method = $class->getMethod('truncateString');
     $method->setAccessible(TRUE);
