@@ -20,7 +20,7 @@ use Symfony\Component\Yaml\Yaml;
 final class IcmsCatalogBuilder {
 
   /**
-   * ICMS 1.7 node base field: a page whose translations own their paragraphs.
+   * ICMS node base field (ICMS-768, unreleased): a page whose translations own their paragraphs.
    */
   public const DETACHED_CONTENT_FLAG = 'icms_detached_content';
 
@@ -269,7 +269,7 @@ final class IcmsCatalogBuilder {
         ];
         $allowedByNodeType[$nodeBundle] = $allowed;
         // Whether a page of this bundle can hold a different paragraph tree
-        // per language (ICMS 1.7 detached content needs the field
+        // per language (ICMS detached content needs the field
         // translatable). The migration blocks a run whose source pages
         // diverge per language until this is TRUE on their bundle.
         $indexes['nodeTypes'][$nodeBundle]['paragraphsFieldTranslatable'] = $nodeDefinitions[$layoutsField]->isTranslatable();
@@ -327,7 +327,7 @@ final class IcmsCatalogBuilder {
       // this key keeps hydrating the catalog): per node bundle
       // `paragraphsFieldTranslatable` and this block, so the migration can
       // tell whether a page may own a paragraph tree per language
-      // (ICMS 1.7, ICMS-768) before it imports one. Absent = cannot verify.
+      // (ICMS-768, unreleased) before it imports one. Absent = cannot verify.
       'detachedContent' => $this->detachedContent(),
       'roles' => $this->roles(),
       'menus' => $this->menus(),
@@ -412,7 +412,7 @@ final class IcmsCatalogBuilder {
   /**
    * Whether this site can keep a paragraph tree per language.
    *
-   * ICMS 1.7 (`icms_core_logic`, ICMS-768) adds the node base field
+   * `icms_core_logic` (ICMS-768, not in a release yet) adds the node base field
    * `icms_detached_content`; a page flagged with it stops mirroring the
    * original's paragraphs into its translations. `supported` says the flag
    * exists; whether a given bundle can USE it is `paragraphsFieldTranslatable`
@@ -442,7 +442,7 @@ final class IcmsCatalogBuilder {
    */
   private function baseNodeFields(string $bundle): array {
     $definitions = $this->fieldManager->getFieldDefinitions('node', $bundle);
-    // `icms_detached_content` (ICMS 1.7) is listed when the site has it, so
+    // `icms_detached_content` (ICMS detached content) is listed when the site has it, so
     // the import can flag a page whose translations own their paragraphs.
     $names = ['created', 'changed', 'promote', 'sticky', 'publish_on', 'unpublish_on', self::DETACHED_CONTENT_FLAG];
     $fields = [];

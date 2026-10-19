@@ -28,7 +28,7 @@ final class IcmsMcpTranslationModeTest extends UnitTestCase {
   /**
    * An attached page on a translatable field still translates in place.
    *
-   * On an ICMS 1.7 target the field is translatable for EVERY page, so
+   * On a target that ships detached content the field is translatable for EVERY page, so
    * structureMatch must win over the field's translatability.
    *
    * @covers ::translationParagraphMode

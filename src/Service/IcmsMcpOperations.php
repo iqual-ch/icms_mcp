@@ -48,7 +48,7 @@ final class IcmsMcpOperations {
   protected const DEFAULT_LAYOUTS_FIELD = 'field_icms_paragraphs';
 
   /**
-   * ICMS 1.7 node base field: TRUE when each translation owns its paragraphs.
+   * ICMS node base field (ICMS-768, unreleased): TRUE when each translation owns its paragraphs.
    *
    * Installed by icms_core_logic (ICMS-768). The default-language import sets
    * it from `node.attributes` like any other field; `writeTranslations`
@@ -1671,14 +1671,14 @@ final class IcmsMcpOperations {
    * summary — shared paragraphs are never silently replaced per language.
    *
    * A translation shipped with `mode: "detached"` owns its paragraph tree
-   * (ICMS 1.7 "detached content"): its paragraphs are created as
+   * (ICMS "detached content"): its paragraphs are created as
    * single-language entities in that language and set on the translation's
    * own field rows. That needs the layouts field translatable and the node
    * flagged `icms_detached_content` by the default-language import — the
    * ICMS presave hook mirrors the original's list over every translation of
    * an attached node, so without the flag the per-language set would not
    * survive the next save. The mode is chosen by the spec, never by the
-   * field's translatability alone: on a 1.7 target the field is translatable
+   * field's translatability alone: on a target with detached content the field is translatable
    * for every page, and attached pages must still translate in place.
    *
    * @param int $nid
@@ -1759,7 +1759,7 @@ final class IcmsMcpOperations {
       );
       $detached_reason = NULL;
       if ($mode === 'detached_unsupported') {
-        $detached_reason = "Field {$layouts_field} is not translatable on this target; the translation's own sections cannot be stored. Make the field translatable (ICMS 1.7 detached content) and re-import.";
+        $detached_reason = "Field {$layouts_field} is not translatable on this target; the translation's own sections cannot be stored. Make the field translatable (ICMS detached content) and re-import.";
       }
       elseif ($mode === 'detached' && !$node->hasField(self::DETACHED_CONTENT_FLAG)) {
         $mode = 'detached_unsupported';
@@ -1937,7 +1937,7 @@ final class IcmsMcpOperations {
    * - `shared`: nothing is written to paragraphs.
    *
    * The field's translatability alone never selects a per-language set: on an
-   * ICMS 1.7 target every page's field is translatable and attached pages are
+   * target with detached content every page's field is translatable and attached pages are
    * mirrored from the original on save, so a per-language set written without
    * the detached flag would be replaced by the next editorial save.
    */
