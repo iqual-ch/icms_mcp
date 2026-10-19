@@ -202,7 +202,7 @@ final class IcmsCatalogBuilder {
   }
 
   /** Return the compact, normalized catalog manifest. */
-  public function buildManifest(string $sourceField, string $layoutsField): array {
+  public function buildManifest(string $sourceField, string $layoutsField, array $identityFields = []): array {
     $descriptions = $this->descriptions();
     $options = $this->options();
     $fieldDefinitions = [];
@@ -321,7 +321,15 @@ final class IcmsCatalogBuilder {
       // menu gate maps onto the target's real menus instead of Drupal's
       // standard four. Readers tolerate v2.
       'format' => 'icms-target-catalog-v3',
-      'site' => ['sourceKeyField' => $sourceField, 'layoutsField' => $layoutsField],
+      'site' => [
+        'sourceKeyField' => $sourceField,
+        'layoutsField' => $layoutsField,
+        // Per bundle, the field that identifies a node that exists BEFORE
+        // the migration (ERP products): the import updates such a node when
+        // the page carries the same value. `{bundle: field}`, empty unless
+        // the site set `icms_mcp.identity_fields`.
+        'identityFields' => $identityFields,
+      ],
       'languages' => $this->languages(),
       // Additive to v3 (the format name stays, so an engine that predates
       // this key keeps hydrating the catalog): per node bundle

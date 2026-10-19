@@ -251,6 +251,7 @@ final class IcmsMcpOperations {
     return $this->catalogBuilder->buildManifest(
       $this->sourceKeyFieldName(),
       $this->layoutsFieldName(),
+      $this->identityFields(),
     );
   }
 
@@ -625,6 +626,18 @@ final class IcmsMcpOperations {
     $path_alias = (string) ($import['node']['path_alias'] ?? '');
     $paragraphs = $import['paragraphs'] ?? [];
     $existing_nid = $this->findNodeBySourceUrl($node_bundle, $source_field, $source_url);
+    $matched_by = $existing_nid !== NULL ? 'source_key' : NULL;
+    $identity_warning = NULL;
+    if ($existing_nid === NULL) {
+      // A bundle whose nodes exist BEFORE the migration (ERP products from
+      // a feed) is matched by its identity field when the page carries the
+      // same value: the migration then adds its content to that node and
+      // stamps the source key, so later runs match by key as usual.
+      [$existing_nid, $identity_warning] = $this->findNodeByIdentity($node_bundle, $node_attrs);
+      if ($existing_nid !== NULL) {
+        $matched_by = 'identity';
+      }
+    }
 
     // The idempotency lookup is bundle-scoped, so a page re-imported under a
     // corrected bundle (news instead of page) creates a NEW node and the old
@@ -680,6 +693,8 @@ final class IcmsMcpOperations {
         'status' => 'dry_run_ok',
         'plan' => $existing_nid === NULL ? 'create' : 'update',
         'existing_nid' => $existing_nid,
+        'matched_by' => $matched_by,
+        ...($identity_warning !== NULL ? ['warnings' => [$identity_warning]] : []),
         'idempotence_key' => $idempotence_key,
         'node_bundle' => $node_bundle,
         'paragraph_count' => count($paragraphs),
@@ -733,6 +748,12 @@ final class IcmsMcpOperations {
       $result['idempotence_key'] = $idempotence_key;
       $result['strategy'] = $strategy;
       $result['action'] = $existing_nid === NULL ? 'created' : 'updated';
+      if ($matched_by !== NULL) {
+        $result['matched_by'] = $matched_by;
+      }
+      if ($identity_warning !== NULL) {
+        $result['warnings'] = array_merge($result['warnings'] ?? [], [$identity_warning]);
+      }
       if ($bundle_conflict !== NULL) {
         $result['bundle_conflict'] = $bundle_conflict;
         $result['warnings'] = array_merge($result['warnings'] ?? [], [$bundle_conflict['warning']]);
@@ -3821,6 +3842,102 @@ final class IcmsMcpOperations {
     }
     $parts = explode('--', $type_raw, 2);
     return count($parts) === 2 ? $parts[1] : $type_raw;
+  }
+
+  /**
+   * The field that identifies a bundle's nodes besides the source key.
+   *
+   * State `icms_mcp.identity_fields`: `{bundle: field}` (an array, or the
+   * JSON a `drush state:set` passes). Empty by default — only a site whose
+   * nodes exist before the migration (products from an ERP feed) needs it.
+   */
+  public static function identityFieldFor(mixed $config, string $bundle): string {
+    if (is_string($config)) {
+      $decoded = json_decode($config, TRUE);
+      $config = is_array($decoded) ? $decoded : [];
+    }
+    if (!is_array($config)) {
+      return '';
+    }
+    $field = $config[$bundle] ?? '';
+    return is_string($field) ? trim($field) : '';
+  }
+
+  /**
+   * The configured identity fields, `{bundle: field}`.
+   */
+  public function identityFields(): array {
+    $config = $this->state->get('icms_mcp.identity_fields', []);
+    if (is_string($config)) {
+      $decoded = json_decode($config, TRUE);
+      $config = is_array($decoded) ? $decoded : [];
+    }
+    $fields = [];
+    foreach (is_array($config) ? $config : [] as $bundle => $field) {
+      if (is_string($field) && trim($field) !== '') {
+        $fields[(string) $bundle] = trim($field);
+      }
+    }
+    ksort($fields);
+    return $fields;
+  }
+
+  /**
+   * The node of `$bundle` the page's identity value names, when there is one.
+   *
+   * Returns `[nid, warning]`: the nid when exactly one node carries the
+   * value and holds no other page's source key; NULL with a warning when
+   * the value names several nodes or one another source page already
+   * claimed (the data is not what we think — never pick one); NULL without
+   * a warning when the bundle has no identity field, the page carries no
+   * value, or nothing matches (the node is created as usual).
+   */
+  protected function findNodeByIdentity(string $bundle, array $attrs): array {
+    $field = self::identityFieldFor($this->state->get('icms_mcp.identity_fields', []), $bundle);
+    if ($field === '' || !array_key_exists($field, $attrs)) {
+      return [NULL, NULL];
+    }
+    $raw = $attrs[$field];
+    if (is_array($raw)) {
+      $raw = $raw['value'] ?? $raw['target_id'] ?? reset($raw);
+    }
+    $value = trim((string) (is_scalar($raw) ? $raw : ''));
+    if ($value === '') {
+      return [NULL, NULL];
+    }
+    try {
+      $nids = $this->entityTypeManager->getStorage('node')->getQuery()
+        ->accessCheck(FALSE)
+        ->condition('type', $bundle)
+        ->condition($field, $value)
+        ->range(0, 2)
+        ->execute();
+    }
+    catch (\Throwable $e) {
+      $this->logger->warning('icms_mcp:findNodeByIdentity failed: @msg', ['@msg' => $e->getMessage()]);
+      return [NULL, NULL];
+    }
+    if (!$nids) {
+      return [NULL, NULL];
+    }
+    if (count($nids) > 1) {
+      $listing = implode(', ', $nids);
+      return [
+        NULL,
+        "Identity {$field} = '{$value}' names several {$bundle} nodes ({$listing}); a new node was created instead of guessing.",
+      ];
+    }
+    $nid = (int) reset($nids);
+    $node = $this->entityTypeManager->getStorage('node')->load($nid);
+    $source_field = $this->sourceKeyFieldName();
+    if ($node !== NULL && $node->hasField($source_field) && !$node->get($source_field)->isEmpty()) {
+      $other = (string) $node->get($source_field)->value;
+      return [
+        NULL,
+        "Identity {$field} = '{$value}' names node {$nid}, which another source page already imported ({$other}); a new node was created instead of overwriting it.",
+      ];
+    }
+    return [$nid, NULL];
   }
 
   protected function sourceKeyFieldName(): string {
