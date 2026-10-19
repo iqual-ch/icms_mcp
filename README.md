@@ -108,6 +108,7 @@ Two field machine names are configurable via `state` (defaults shown):
 | ----------------------------- | ------------------------ | ------------------------------------------------------------------------- |
 | `icms_mcp.source_key_field`   | `field_icms_source_key`  | Plain string field (max 512) on every migrated node bundle storing the agent's `idempotence_key`. |
 | `icms_mcp.layouts_field`      | `field_icms_paragraphs`  | `entity_reference_revisions` field on `icms_page` that holds layout paragraphs. |
+| `icms_mcp.identity_fields`    | `{}`                     | Per bundle, the field that identifies a node that exists **before** the migration — e.g. `{"icms_product": "field_icms_product_id"}` for products an ERP feed created. A page whose attributes carry that field updates the matching node instead of creating a twin, and stamps its source key on it. Several matches, or a node another page already claimed, are refused with a warning and the page creates a new node. Reported in the catalog as `site.identityFields`. |
 
 The **source-key field is owned by this module** — it is pure migration
 infrastructure, so install/update hooks create it on every node bundle,
@@ -120,6 +121,7 @@ of the ICMS content model. If the defaults don't match your install:
 ```bash
 ddev drush state:set icms_mcp.source_key_field field_my_source_key
 ddev drush state:set icms_mcp.layouts_field field_my_paragraphs
+ddev drush state:set icms_mcp.identity_fields '{"icms_product": "field_icms_product_id"}'
 ```
 
 `validate_pivot` and `get_icms_catalog` both surface a clear error when
