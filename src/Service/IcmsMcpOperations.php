@@ -48,6 +48,15 @@ final class IcmsMcpOperations {
   protected const DEFAULT_LAYOUTS_FIELD = 'field_icms_paragraphs';
 
   /**
+   * ICMS 1.7 node base field: TRUE when each translation owns its paragraphs.
+   *
+   * Installed by icms_core_logic (ICMS-768). The default-language import sets
+   * it from `node.attributes` like any other field; `writeTranslations`
+   * requires it before writing a detached translation.
+   */
+  public const DETACHED_CONTENT_FLAG = 'icms_detached_content';
+
+  /**
    * URI of a menu item that is a parent only — Drupal's unrouted "<nolink>".
    *
    * Given to an imported parent whose own page is missing on the target, so
@@ -1651,23 +1660,33 @@ final class IcmsMcpOperations {
   }
 
   /**
-   * Create/update node translations under the symmetric paragraph model.
+   * Create/update node translations: symmetric by default, detached on demand.
    *
-   * ICMS keeps the layouts field non-translatable (one paragraph set shared
-   * across languages). A translation whose paragraph structure matches the
-   * default language's (`structureMatch: true`, stamped by the agent and
-   * re-verified here) is written INTO translations of the shared paragraph
-   * entities, matched by position. A mismatched language
-   * (`structureMatch: false`, shipped without paragraphs) gets scalar node
-   * fields only, with the reason in the summary — shared paragraphs are
-   * never silently replaced per language. When a target's layouts field IS
-   * translatable, the legacy per-language paragraph set path still applies.
+   * ICMS shares one paragraph set across languages by default. A translation
+   * whose paragraph structure matches the default language's
+   * (`structureMatch: true`, stamped by the agent and re-verified here) is
+   * written INTO translations of the shared paragraph entities, matched by
+   * position. A mismatched language (`structureMatch: false`, shipped
+   * without paragraphs) gets scalar node fields only, with the reason in the
+   * summary — shared paragraphs are never silently replaced per language.
+   *
+   * A translation shipped with `mode: "detached"` owns its paragraph tree
+   * (ICMS 1.7 "detached content"): its paragraphs are created as
+   * single-language entities in that language and set on the translation's
+   * own field rows. That needs the layouts field translatable and the node
+   * flagged `icms_detached_content` by the default-language import — the
+   * ICMS presave hook mirrors the original's list over every translation of
+   * an attached node, so without the flag the per-language set would not
+   * survive the next save. The mode is chosen by the spec, never by the
+   * field's translatability alone: on a 1.7 target the field is translatable
+   * for every page, and attached pages must still translate in place.
    *
    * @param int $nid
    *   The saved default-language node ID.
    * @param array $translations
    *   Translation specs
-   *   ({langcode, node.attributes, paragraphs, structureMatch?, structureReason?}).
+   *   ({langcode, node.attributes, paragraphs, mode?, structureMatch?,
+   *   structureReason?}).
    *
    * @return array
    *   One summary entry per requested translation.
@@ -1734,10 +1753,48 @@ final class IcmsMcpOperations {
         ? $translation->getFieldDefinition($layouts_field)
         : NULL;
 
-      if ($paragraph_specs && $paragraph_storage !== NULL && $field_definition !== NULL && $field_definition->isTranslatable()) {
-        foreach ($translation->get($layouts_field) as $item) {
+      $mode = self::translationParagraphMode(
+        $translation_spec,
+        $field_definition !== NULL && $field_definition->isTranslatable(),
+      );
+      $detached_reason = NULL;
+      if ($mode === 'detached_unsupported') {
+        $detached_reason = "Field {$layouts_field} is not translatable on this target; the translation's own sections cannot be stored. Make the field translatable (ICMS 1.7 detached content) and re-import.";
+      }
+      elseif ($mode === 'detached' && !$node->hasField(self::DETACHED_CONTENT_FLAG)) {
+        $mode = 'detached_unsupported';
+        $detached_reason = 'This target has no detached-content support (icms_core_logic with the ' . self::DETACHED_CONTENT_FLAG . ' flag); the per-language sections would be mirrored over on the next save. Update ICMS and re-import.';
+      }
+      elseif ($mode === 'detached' && !(bool) $node->get(self::DETACHED_CONTENT_FLAG)->value) {
+        $mode = 'detached_unsupported';
+        $detached_reason = 'The node is not flagged ' . self::DETACHED_CONTENT_FLAG . '; the default-language import must set it before a translation can own its sections.';
+      }
+
+      if ($mode === 'detached' && $paragraph_specs && $paragraph_storage !== NULL) {
+        // A translation added in this call is saved once empty first: the
+        // ICMS presave hook clones the original's tree into every NEW
+        // translation of a detached node, and it would clone — and orphan —
+        // the paragraphs created below if they were already on the field.
+        // Saved with no rows, the hook finds nothing to clone; the second
+        // save then keeps the imported list (not new, shares nothing).
+        if (!$exists) {
+          $translation->set($layouts_field, []);
+          $translation->save();
+        }
+        // The translation's previous rows are replaced and deleted after the
+        // save — unless they are the default language's own paragraphs (a
+        // translation that was still mirrored, on a target without the
+        // presave clone): deleting those would empty the original.
+        $shared_ids = [];
+        foreach ($node->getUntranslated()->get($layouts_field) as $item) {
           $target_id = (int) ($item->target_id ?? 0);
           if ($target_id > 0) {
+            $shared_ids[$target_id] = $target_id;
+          }
+        }
+        foreach ($translation->get($layouts_field) as $item) {
+          $target_id = (int) ($item->target_id ?? 0);
+          if ($target_id > 0 && !isset($shared_ids[$target_id])) {
             $old_ref_ids[$target_id] = $target_id;
           }
         }
@@ -1766,13 +1823,13 @@ final class IcmsMcpOperations {
         }
         $translation->set($layouts_field, $created);
         $paragraphs_translated = TRUE;
-        $paragraphs_mode = 'per_language_set';
+        $paragraphs_mode = 'detached';
       }
       elseif (
-        $paragraph_specs
+        $mode === 'symmetric'
+        && $paragraph_specs
         && $paragraph_storage !== NULL
         && $field_definition !== NULL
-        && ($translation_spec['structureMatch'] ?? NULL) === TRUE
       ) {
         // Symmetric model: the layouts field is shared across languages, and
         // the agent verified this language's paragraph structure matches the
@@ -1829,14 +1886,17 @@ final class IcmsMcpOperations {
         'paragraphs_mode' => $paragraphs_mode,
         'media_count' => $media_count,
       ];
-      if (($translation_spec['structureMatch'] ?? NULL) === FALSE) {
+      if ($detached_reason !== NULL) {
+        $entry['reason'] = $detached_reason;
+      }
+      elseif (($translation_spec['structureMatch'] ?? NULL) === FALSE) {
         $entry['reason'] = (string) ($translation_spec['structureReason']
           ?? 'paragraph structure differs from the default language; sections not imported.');
       }
       elseif ($paragraph_specs && !$paragraphs_translated) {
         $entry['reason'] = $symmetric_reason !== NULL
           ? "Symmetric translation aborted ({$symmetric_reason}); scalar fields were translated, paragraphs stay shared."
-          : "Field {$layouts_field} is not translatable; scalar fields were translated, paragraphs stay shared.";
+          : 'The translation is neither structure-matched nor detached; scalar fields were translated, paragraphs stay shared.';
       }
       if ($untranslated_fields) {
         // Fields whose target config keeps them shared across languages —
@@ -1863,6 +1923,32 @@ final class IcmsMcpOperations {
     }
 
     return $summary;
+  }
+
+  /**
+   * Which paragraph write a translation spec asks for.
+   *
+   * - `detached`: the spec says `mode: "detached"` and the layouts field is
+   *   translatable — the translation gets its own single-language tree.
+   * - `detached_unsupported`: the spec asks for it but the field cannot hold
+   *   per-language rows — scalar fields only, with the reason reported.
+   * - `symmetric`: `structureMatch: true` — written into translations of the
+   *   shared paragraphs by position, whether or not the field is translatable.
+   * - `shared`: nothing is written to paragraphs.
+   *
+   * The field's translatability alone never selects a per-language set: on an
+   * ICMS 1.7 target every page's field is translatable and attached pages are
+   * mirrored from the original on save, so a per-language set written without
+   * the detached flag would be replaced by the next editorial save.
+   */
+  public static function translationParagraphMode(array $spec, bool $field_translatable): string {
+    if (($spec['mode'] ?? NULL) === 'detached') {
+      return $field_translatable ? 'detached' : 'detached_unsupported';
+    }
+    if (($spec['structureMatch'] ?? NULL) === TRUE) {
+      return 'symmetric';
+    }
+    return 'shared';
   }
 
   /**

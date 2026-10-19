@@ -39,6 +39,30 @@ plugin's styles (label, tag, classes) and the classes the format allows on text 
 what a source's `lead` / `small` / blockquote text can bind to, and what a design
 handoff's type scale still has to add.
 
+### Translations: symmetric by default, detached on demand
+
+A translation in `import_pivot`'s `translations[]` is written one of three ways,
+chosen by the spec, never by the field's translatability alone:
+
+| Spec | Written as | Summary `paragraphs_mode` |
+| --- | --- | --- |
+| `structureMatch: true` | into translations of the **shared** paragraph entities, by position, after a structure re-check | `symmetric` |
+| `mode: "detached"` | its **own** single-language paragraph tree on the translation's field rows (ICMS 1.7 detached content, ICMS-768) | `detached` |
+| neither | scalar node fields only, with the `reason` | `shared` |
+
+Detached needs two things on the target, both reported by the catalog: the bundle's
+layouts field translatable (`nodeTypes.<bundle>.paragraphsFieldTranslatable`) and the
+`icms_detached_content` node base field (`detachedContent.supported`). The
+default-language import sets the flag like any other node attribute
+(`node.attributes.icms_detached_content: true`); without it the ICMS presave hook
+would mirror the original's paragraphs back over the translation on the next
+editorial save, so `writeTranslations` refuses a detached translation on an
+unflagged node and says why in `reason`. A new translation of a detached node is
+saved once empty before its paragraphs are set, so the ICMS hook has nothing to
+clone and the imported list is the one that stays. On an ICMS 1.7 target the
+field is translatable for every page: an attached page still takes the
+symmetric path, which is why `structureMatch` decides and not the field.
+
 `get_icms_catalog` intentionally replaces the old expanded v1 response. Use
 `get_icms_component_contract` for details; clients should cache by
 `catalogHash`. Component guidance and option definitions ship under `resources/`,
