@@ -19,6 +19,11 @@ use Symfony\Component\Yaml\Yaml;
 /** Builds compact ICMS catalog manifests and targeted component contracts. */
 final class IcmsCatalogBuilder {
 
+  /**
+   * ICMS node base field (ICMS-768, unreleased): a page whose translations own their paragraphs.
+   */
+  public const DETACHED_CONTENT_FLAG = 'icms_detached_content';
+
   private ?array $descriptionCache = NULL;
 
   public function __construct(
@@ -263,6 +268,11 @@ final class IcmsCatalogBuilder {
           'targetBundles' => $allowed,
         ];
         $allowedByNodeType[$nodeBundle] = $allowed;
+        // Whether a page of this bundle can hold a different paragraph tree
+        // per language (ICMS detached content needs the field
+        // translatable). The migration blocks a run whose source pages
+        // diverge per language until this is TRUE on their bundle.
+        $indexes['nodeTypes'][$nodeBundle]['paragraphsFieldTranslatable'] = $nodeDefinitions[$layoutsField]->isTranslatable();
       }
       $indexes['nodeTypes'][$nodeBundle]['paragraphSlots'] = $paragraphSlots;
     }
@@ -313,6 +323,12 @@ final class IcmsCatalogBuilder {
       'format' => 'icms-target-catalog-v3',
       'site' => ['sourceKeyField' => $sourceField, 'layoutsField' => $layoutsField],
       'languages' => $this->languages(),
+      // Additive to v3 (the format name stays, so an engine that predates
+      // this key keeps hydrating the catalog): per node bundle
+      // `paragraphsFieldTranslatable` and this block, so the migration can
+      // tell whether a page may own a paragraph tree per language
+      // (ICMS-768, unreleased) before it imports one. Absent = cannot verify.
+      'detachedContent' => $this->detachedContent(),
       'roles' => $this->roles(),
       'menus' => $this->menus(),
       // The target's webforms, for the section gate's "bind to" dropdown, and
@@ -394,6 +410,27 @@ final class IcmsCatalogBuilder {
   }
 
   /**
+   * Whether this site can keep a paragraph tree per language.
+   *
+   * `icms_core_logic` (ICMS-768, not in a release yet) adds the node base field
+   * `icms_detached_content`; a page flagged with it stops mirroring the
+   * original's paragraphs into its translations. `supported` says the flag
+   * exists; whether a given bundle can USE it is `paragraphsFieldTranslatable`
+   * on that bundle (the field must be translatable, a per-project config
+   * decision).
+   */
+  private function detachedContent(): array {
+    $flag = self::DETACHED_CONTENT_FLAG;
+    $supported = $this->entityTypeManager->hasDefinition('node')
+      && $this->moduleHandler->moduleExists('icms_core_logic')
+      && isset($this->fieldManager->getBaseFieldDefinitions('node')[$flag]);
+    return [
+      'supported' => $supported,
+      'flagField' => $flag,
+    ];
+  }
+
+  /**
    * The node base fields a migration may write, as a mapping target list.
    *
    * `configuredFields()` keeps configurable fields only, so `created` and
@@ -405,7 +442,9 @@ final class IcmsCatalogBuilder {
    */
   private function baseNodeFields(string $bundle): array {
     $definitions = $this->fieldManager->getFieldDefinitions('node', $bundle);
-    $names = ['created', 'changed', 'promote', 'sticky', 'publish_on', 'unpublish_on'];
+    // `icms_detached_content` (ICMS detached content) is listed when the site has it, so
+    // the import can flag a page whose translations own their paragraphs.
+    $names = ['created', 'changed', 'promote', 'sticky', 'publish_on', 'unpublish_on', self::DETACHED_CONTENT_FLAG];
     $fields = [];
     foreach ($names as $name) {
       if (isset($definitions[$name]) && !($definitions[$name]->getFieldStorageDefinition() instanceof FieldStorageConfigInterface)) {
