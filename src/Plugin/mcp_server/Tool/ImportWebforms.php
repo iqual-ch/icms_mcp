@@ -18,7 +18,7 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 #[Tool(
   id: 'import_webforms',
   label: new TranslatableMarkup('Import webforms'),
-  description: new TranslatableMarkup('Import the source site\'s webforms: config verbatim (elements, settings, handlers, translations) and submissions. A form this site already has under the same id is matched and left untouched — only submissions are added. Submissions are idempotent by uuid and their submitter is re-linked by e-mail (anonymous when unknown), so users import BEFORE webforms; webforms import BEFORE nodes so a contact component or a lifted registration form can reference them. Returns per-webform {action, submissionsCreated, submissionsSkipped}.'),
+  description: new TranslatableMarkup('Import the source site\'s webforms: config as exported (elements, settings, handlers, translations) minus the third-party settings of modules this site does not have (antibot, honeypot, …), which would otherwise break every later config import; and submissions. A form this site already has under the same id is matched and left untouched — only submissions are added. Submissions are idempotent by uuid and their submitter is re-linked by e-mail (anonymous when unknown), so users import BEFORE webforms; webforms import BEFORE nodes so a contact component or a lifted registration form can reference them. Returns per-webform {action, submissionsCreated, submissionsSkipped, droppedThirdPartySettings?}.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [

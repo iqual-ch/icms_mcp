@@ -10,6 +10,7 @@ use Drupal\Core\Database\Connection;
 use Drupal\Core\Entity\EntityFieldManagerInterface;
 use Drupal\Core\Entity\EntityTypeBundleInfoInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
+use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\File\FileExists;
 use Drupal\Core\File\FileSystemInterface;
@@ -132,6 +133,7 @@ final class IcmsMcpOperations {
     protected LockBackendInterface $lock,
     protected ?LanguageManagerInterface $languageManager = NULL,
     protected ?FileUrlGeneratorInterface $fileUrlGenerator = NULL,
+    protected ?ModuleHandlerInterface $moduleHandler = NULL,
   ) {}
 
   /**
@@ -1198,10 +1200,11 @@ final class IcmsMcpOperations {
   }
 
   /**
-   * Import the source's webforms: config verbatim, submissions idempotently.
+   * Import the source's webforms: config as exported, submissions idempotently.
    *
    * A form the target does not have is created from the exported config array
-   * as-is (handlers and recipients included) plus its config translations for
+   * (handlers and recipients included, third-party settings of modules this
+   * site lacks dropped — see withoutForeignThirdPartySettings()) plus its config translations for
    * the languages this site has enabled. A form the target already has under
    * the same id is the customer's: it is matched and its config left alone —
    * only submissions are added. Submissions are idempotent by uuid, so a
@@ -1250,6 +1253,11 @@ final class IcmsMcpOperations {
         }
         if (isset($config['uuid']) && $this->uuidTaken('webform', (string) $config['uuid'])) {
           unset($config['uuid']);
+        }
+        [$config, $dropped_modules] = static::withoutForeignThirdPartySettings($config, $this->isModuleInstalled(...));
+        if ($dropped_modules) {
+          $row['droppedThirdPartySettings'] = $dropped_modules;
+          $this->logger->notice('icms_mcp: webform @id imported without the settings of modules this site does not have: @modules', ['@id' => $webform_id, '@modules' => implode(', ', $dropped_modules)]);
         }
         try {
           $webform = $webform_storage->create($config);
@@ -1328,6 +1336,63 @@ final class IcmsMcpOperations {
       'submissions_skipped' => $submissions_skipped,
       'webforms' => $results,
     ];
+  }
+
+  /**
+   * Whether a module is installed here; without a module handler, assume yes.
+   */
+  protected function isModuleInstalled(string $module): bool {
+    return $this->moduleHandler === NULL || $this->moduleHandler->moduleExists($module);
+  }
+
+  /**
+   * A config array without the third-party settings of modules absent here.
+   *
+   * Exported config carries `third_party_settings` keyed by module (antibot,
+   * honeypot, …) and a `dependencies.module` list naming them. Saved as-is on
+   * a site without those modules, the entity validates fine but every later
+   * `drush deploy` fails config validation ("depends on module X, which will
+   * not be installed after import"), and the site silently stays on stale
+   * config. Settings of modules this site has are kept; the dependency list
+   * is dropped so Drupal recomputes it on save.
+   *
+   * @param array $config
+   *   The exported config entity array.
+   * @param callable $module_installed
+   *   `fn (string $module): bool`.
+   *
+   * @return array{0: array, 1: string[]}
+   *   The config and the sorted module names whose settings were dropped.
+   */
+  public static function withoutForeignThirdPartySettings(array $config, callable $module_installed): array {
+    $dropped = [];
+    $settings = $config['third_party_settings'] ?? NULL;
+    if (is_array($settings)) {
+      foreach (array_keys($settings) as $module) {
+        if (!$module_installed((string) $module)) {
+          unset($settings[$module]);
+          $dropped[] = (string) $module;
+        }
+      }
+      if ($settings === []) {
+        unset($config['third_party_settings']);
+      }
+      else {
+        $config['third_party_settings'] = $settings;
+      }
+    }
+    $dependencies = $config['dependencies'] ?? NULL;
+    if (is_array($dependencies)) {
+      // Keep what the source enforced; the rest is derived from the config
+      // itself and recalculated on save.
+      $enforced = $dependencies['enforced'] ?? NULL;
+      unset($config['dependencies']);
+      if (is_array($enforced) && $enforced !== []) {
+        $config['dependencies'] = ['enforced' => $enforced];
+      }
+    }
+    sort($dropped);
+    return [$config, $dropped];
   }
 
   /**
