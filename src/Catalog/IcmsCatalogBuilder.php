@@ -389,11 +389,8 @@ final class IcmsCatalogBuilder {
         'id' => $bundle,
         'label' => (string) ($known[$bundle]['label'] ?? $bundle),
         'description' => (string) ($editorial['summary'] ?? ''),
-        'guidance' => [
-          'useWhen' => array_values($editorial['useWhen'] ?? []),
-          'avoidWhen' => array_values($editorial['avoidWhen'] ?? []),
-          'similarTo' => array_values($editorial['similarTo'] ?? []),
-        ],
+        'guidance' => self::guidanceFromEditorial($editorial),
+        'sourcePatterns' => self::sourcePatternsFromEditorial($editorial),
         'capabilities' => $this->capabilities($fields, $editorial),
         'fields' => $resolved,
         'childBundles' => $this->childBundles($fields),
@@ -545,6 +542,42 @@ final class IcmsCatalogBuilder {
       }
     }
     return $children;
+  }
+
+  /**
+   * The editorial guidance lists of a description entry.
+   */
+  public static function guidanceFromEditorial(array $editorial): array {
+    $list = static fn(string $key): array => array_values(array_filter(
+      array_map(static fn($item): string => trim((string) $item), (array) ($editorial[$key] ?? [])),
+      static fn(string $item): bool => $item !== '',
+    ));
+    return [
+      'useWhen' => $list('useWhen'),
+      'avoidWhen' => $list('avoidWhen'),
+      'similarTo' => $list('similarTo'),
+    ];
+  }
+
+  /**
+   * Source component names a bundle declares itself the home for.
+   *
+   * `sourcePatterns: [slider, animatedslider]` on a description entry is the
+   * project's own migration recipe: the content migrator maps a source
+   * section built from one of these components to this bundle before any
+   * rule of its own. Names are the source system's component machine names
+   * (a PageDesigner pattern, a crawl adapter's component tag), lower-cased and
+   * de-duplicated; prose hints stay in `useWhen` / `avoidWhen`.
+   */
+  public static function sourcePatternsFromEditorial(array $editorial): array {
+    $patterns = [];
+    foreach ((array) ($editorial['sourcePatterns'] ?? []) as $item) {
+      $name = mb_strtolower(trim((string) $item));
+      if ($name !== '' && !in_array($name, $patterns, TRUE)) {
+        $patterns[] = $name;
+      }
+    }
+    return $patterns;
   }
 
   private function capabilities(array $fields, array $editorial): array {

@@ -68,7 +68,13 @@ symmetric path, which is why `structureMatch` decides and not the field.
 `catalogHash`. Component guidance and option definitions ship under `resources/`,
 can be overridden through `icms_mcp.catalog_descriptions` and
 `icms_mcp.catalog_options`, and expose alter hooks documented in
-`icms_mcp.api.php`.
+`icms_mcp.api.php`. A description entry carries `summary` (the component's
+`description`), the prose lists `useWhen` / `avoidWhen` / `similarTo`
+(`guidance`), `minItems`, and optionally `sourcePatterns`: the source system's
+component names this bundle is the home for (`[slider, animatedslider]` on a
+project's hero slider). The content migrator applies `sourcePatterns` as a
+declared mapping before its own rules, so list only components verified against
+real pages; everything inferred stays in the prose lists.
 
 ## Behaviour summary
 
