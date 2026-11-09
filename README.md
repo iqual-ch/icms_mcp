@@ -74,7 +74,11 @@ can be overridden through `icms_mcp.catalog_descriptions` and
 component names this bundle is the home for (`[slider, animatedslider]` on a
 project's hero slider). The content migrator applies `sourcePatterns` as a
 declared mapping before its own rules, so list only components verified against
-real pages; everything inferred stays in the prose lists.
+real pages; everything inferred stays in the prose lists. `sourceRegions: [side]`
+on a bundle a node's paragraph slot targets (a sidebar bundle) declares that
+content the source placed in a narrow side column belongs in that slot rather
+than in the page content; without it the migrator never moves content between
+slots.
 
 ## Behaviour summary
 

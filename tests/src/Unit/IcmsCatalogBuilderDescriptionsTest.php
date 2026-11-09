@@ -43,4 +43,22 @@ final class IcmsCatalogBuilderDescriptionsTest extends UnitTestCase {
     self::assertSame(['testimonial'], IcmsCatalogBuilder::sourcePatternsFromEditorial(['sourcePatterns' => 'testimonial']));
   }
 
+  /**
+   * Declared source regions reach the catalog as a normalised list.
+   *
+   * A project's description entry names the page region whose content the
+   * bundle receives (a side column); the migrator moves sections from that
+   * region into the node slot targeting the bundle, and nothing without it.
+   *
+   * @covers ::sourceRegionsFromEditorial
+   */
+  public function testSourceRegionsAreNormalisedAndOptional(): void {
+    self::assertSame(
+      ['side'],
+      IcmsCatalogBuilder::sourceRegionsFromEditorial(['sourceRegions' => ['Side', ' side ', '']]),
+    );
+    self::assertSame([], IcmsCatalogBuilder::sourceRegionsFromEditorial(['summary' => 'No recipe.']));
+    self::assertSame(['side'], IcmsCatalogBuilder::sourceRegionsFromEditorial(['sourceRegions' => 'side']));
+  }
+
 }

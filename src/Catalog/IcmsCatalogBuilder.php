@@ -391,6 +391,7 @@ final class IcmsCatalogBuilder {
         'description' => (string) ($editorial['summary'] ?? ''),
         'guidance' => self::guidanceFromEditorial($editorial),
         'sourcePatterns' => self::sourcePatternsFromEditorial($editorial),
+        'sourceRegions' => self::sourceRegionsFromEditorial($editorial),
         'capabilities' => $this->capabilities($fields, $editorial),
         'fields' => $resolved,
         'childBundles' => $this->childBundles($fields),
@@ -578,6 +579,28 @@ final class IcmsCatalogBuilder {
       }
     }
     return $patterns;
+  }
+
+  /**
+   * Source page regions a bundle declares itself the home for.
+   *
+   * `sourceRegions: [side]` on a description entry says that content the
+   * source laid out in that region of the page (a narrow side column next
+   * to the main text: a contact box, related links) belongs in this bundle.
+   * The content migrator moves such sections out of the page content into
+   * the node's paragraph slot that targets the bundle; without a declaration
+   * it leaves them where they were. Region names are lower-cased and
+   * de-duplicated; `side` is the one the migrator knows today.
+   */
+  public static function sourceRegionsFromEditorial(array $editorial): array {
+    $regions = [];
+    foreach ((array) ($editorial['sourceRegions'] ?? []) as $item) {
+      $name = mb_strtolower(trim((string) $item));
+      if ($name !== '' && !in_array($name, $regions, TRUE)) {
+        $regions[] = $name;
+      }
+    }
+    return $regions;
   }
 
   private function capabilities(array $fields, array $editorial): array {
