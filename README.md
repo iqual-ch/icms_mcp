@@ -16,7 +16,8 @@ Tools (`src/Plugin/mcp_server/Tool/`), advertised under their tool id:
 | `import_pivot`           | Transactional create/update of node + paragraphs + translations. Honours `strategy` and HITL gate. |
 | `import_taxonomy_terms`  | Upsert one vocabulary's terms (uuid/name identity, hierarchy, translations). Step 3, before nodes. |
 | `import_menu_links`      | Upsert one menu's links, parents before children; node links resolve via the source-key field, and a parent whose page is missing is kept disabled so its children keep their place. Step 3, after nodes. |
-| `lookup_existing_node`   | Idempotency lookup by canonical source URL (matches against the configured source-key field). |
+| `lookup_existing_node`   | The node an import of a source page would land on: by canonical source URL (the source-key field), and with `path_alias` / `is_front_page` also a page built by hand at the same path (`matched_by: alias \| front_page \| adopted`). |
+| `get_icms_layout_examples` | Read-only: the site's reference examples of each layout bundle and option combination, from the showcase page declared in `icms_mcp.catalog_examples` and its menu children. `{indexHash, pages, examples: [{id, bundle, options, storedOptions, pagePath, ordinal, siblingCount, title, children}], skipped}`. |
 | `rewrite_node_links`     | Post-import pass: `{from, to}` replacements applied to `href`s in text fields and link-field uris (exact, or by resolved `#fragment`) on the node, its translations and its paragraphs. Anchors → `#<paragraph id>`, document links → the stored file's URL. |
 | `set_front_page`         | Make an imported, published node the site front page (`system.site page.front`). |
 | `update_node_references` | Final reference pass: path-addressed write of `entity_reference` / `link` fields on the node or a (nested) paragraph (`{langcode?, path: [{field?, index}], expect_bundle?, field, value}`), translation-aware, saved only on change, one transaction, idempotent. Lets a page imported before the pages it references get its teasers and buttons without a re-import (which would recreate paragraph ids). |
@@ -80,6 +81,60 @@ content the source placed in a narrow side column belongs in that slot rather
 than in the page content; without it the migrator never moves content between
 slots.
 
+### Options: what each value does
+
+On a site with a blökkli schema file (`paragraphs_blokkli.settings: schema_file`)
+every paragraph bundle lists its own options under `optionDefinitions`:
+`{type, default, values, label, valueLabels, displayAs, group}`. `valueLabels`
+are the words an editor sees in blökkli for each value. A relative
+`schema_file` is resolved against the working directory and then the Drupal
+root; a site whose schema cannot be read falls back to the packaged option list
+on every `icms_layout_*` bundle instead of advertising bundles without options.
+
+A key or a label does not say what a value does to the layout. That is
+declared: `resources/blokkli-options.yml` for what holds on every ICMS site,
+the project's `icms_mcp.catalog_options` for its own components.
+
+```yaml
+# icms_mcp.catalog_options
+options:
+  teaserVariant:
+    description: "How each teaser is laid out."
+    effects:
+      teaser: "Image above, then title and text."
+      spotlight: "Image fills the card, title on top of it."
+    bundles:
+      example_layout_teasers:        # only where this bundle differs
+        effects:
+          spotlight: "Large image left, text right."
+```
+
+`description` and `effects` are merged into each bundle's
+`optionDefinitions[<option>]`, the bundle entry over the option-wide one, and
+only for values that bundle offers.
+
+### Examples: where each combination can be seen
+
+A project that builds a showcase (one page per component, one section per
+option combination) declares its root page:
+
+```yaml
+# icms_mcp.catalog_examples
+root: '/showcase'      # path alias, node id or node uuid
+menu: ''               # menu the pages are linked in; empty = any
+max_depth: 3           # menu levels below the root
+langcode: ''           # empty = the root page's language
+```
+
+`get_icms_layout_examples` then lists every published top-level layout
+paragraph on the root and its menu children: its bundle, the options it renders
+with (schema defaults, then what is stored, typed), the page's public path and
+its 1-based `ordinal` among the page's published layouts, so the section can be
+found on the public page. Only pages an anonymous visitor can open are listed;
+the rest is reported under `skipped`. `indexHash` changes when an example
+moves, appears, disappears or changes options. The catalog reports
+`examples.configured`.
+
 ## Behaviour summary
 
 - **Validation runs on every import.** `import_pivot` calls `validate_pivot`
@@ -97,6 +152,21 @@ slots.
     update to repair a node that contains a stale paragraph revision reference.
   - `fail-if-exists` → returns `status: conflict` if a node with the same
     `idempotence_key` already exists.
+- **Pages that exist before the migration.** A node the migration did not
+  write but that sits at the page's path (or is the front page, for the source
+  front page) is matched after the source key and the identity field:
+  `matched_by: alias | front_page`. Only a node without a source key and of
+  the same bundle qualifies. It is never written or duplicated silently:
+  - no `metadata.on_unmanaged` → `status: conflict`,
+    `code: existing_unmanaged_node`, with `existing {nid, bundle, title, url}`;
+  - `on_unmanaged: keep` → the node only receives the source key
+    (`action: adopted`, `kept: true`), so menu links, references and text links
+    to the source page resolve to it. It stays `matched_by: adopted` on later
+    runs, which again need a decision;
+  - `on_unmanaged: overwrite` → the normal update path, whatever the run's
+    strategy; from then on it is an imported page.
+  A hand-built page of another bundle at that path returns `status: conflict`,
+  `code: existing_unmanaged_node_other_bundle`.
 - **Transactional.** All writes run inside a `database->startTransaction()`.
   Any throw inside the write path triggers a `rollBack()` and surfaces as
   `status: error`.

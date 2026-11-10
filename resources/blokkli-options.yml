@@ -1,18 +1,88 @@
+# The standard ICMS blökkli options.
+#
+# `values` is the fallback for a site without a blökkli schema file. On a site
+# with one, the schema decides which bundle has which option and value; this
+# file (and the project's `icms_mcp.catalog_options`) then only documents:
+#
+#   description  what the option is for, one sentence
+#   effects      per value, what it does to the layout — what a reader who
+#                has never seen the component needs to pick the right value
+#   bundles      the same two keys for one bundle, where the option behaves
+#                differently there
+#
+# Only effects that hold for every ICMS project are packaged here. What a
+# card or teaser variant looks like is a project's own design: declare those
+# in `icms_mcp.catalog_options`.
 options:
-  width: { values: [narrow, medium, wide], description: "Content width; wide is the full-width default." }
-  spacingTop: { values: [none, small, large] }
-  spacingBottom: { values: [none, small, large] }
-  colorScheme: { values: [none, light, accent, dark] }
-  colorMode: { values: [none, light, dark] }
-  imageFormat: { values: [auto, landscape, portrait] }
-  alignHorizontalFull: { values: [left, center, right] }
-  alignHorizontalReduced: { values: [left, right] }
-  alignVerticalFull: { values: [top, center, bottom] }
-  alignVerticalReduced: { values: [top, bottom] }
-  slider: { values: [true, false] }
-  sliderColumns: { values: [1, 2, 3, 4] }
-  cardVariant: { values: [feature, text, spotlight, fact] }
-  teaserStyle: { values: [none, highlight] }
-  teaserVariant: { values: [teaser, feature, text, spotlight, flipTeaser, simple] }
-  textColumns: { values: [one, two, three] }
-  textShadow: { values: [none, light, dark, darker] }
+  width:
+    values: [narrow, medium, wide]
+    description: "How much of the page width the content takes."
+    effects:
+      narrow: "Content sits in a narrow centred column."
+      medium: "Content sits in a medium-width centred column."
+      wide: "Content uses the full content width (the default)."
+  spacingTop:
+    values: [none, small, large]
+    description: "Empty space above the section."
+  spacingBottom:
+    values: [none, small, large]
+    description: "Empty space below the section."
+  colorScheme:
+    values: [none, light, accent, dark]
+    description: "Background colour of the section; text colour follows."
+  colorMode:
+    values: [none, light, dark]
+    description: "Whether text on top of media is light or dark."
+  imageFormat:
+    values: [auto, landscape, portrait]
+    description: "The crop the images are shown in."
+    effects:
+      auto: "Images keep their own proportions."
+      landscape: "Images are cropped wider than tall."
+      portrait: "Images are cropped taller than wide."
+  alignHorizontalFull:
+    values: [left, center, right]
+    description: "Horizontal position of the content."
+  alignHorizontalReduced:
+    values: [left, right]
+    description: "Horizontal position of the content: left or right."
+    bundles:
+      icms_layout_text_media:
+        description: "Which side the text sits on; the media takes the other side."
+        effects:
+          left: "Text on the left, media on the right."
+          right: "Text on the right, media on the left."
+  alignVerticalFull:
+    values: [top, center, bottom]
+    description: "Vertical position of the content."
+  alignVerticalReduced:
+    values: [top, bottom]
+    description: "Vertical position of the content."
+  slider:
+    values: [true, false]
+    description: "Whether the items scroll sideways instead of wrapping."
+    effects:
+      "true": "Items sit in one row that slides horizontally."
+      "false": "Items wrap into a grid."
+  sliderColumns:
+    values: [1, 2, 3, 4]
+    description: "How many items are visible side by side on a desktop screen."
+  cardVariant:
+    values: [feature, text, spotlight, fact]
+    description: "How each card is laid out."
+  teaserStyle:
+    values: [none, highlight]
+    description: "Whether the teasers are visually emphasised."
+  teaserVariant:
+    values: [teaser, feature, text, spotlight, flipTeaser, simple]
+    description: "How each teaser is laid out."
+  textColumns:
+    values: [one, two, three]
+    description: "How many columns the text flows in."
+    effects:
+      one: "Text in a single column."
+      two: "Text split into two columns side by side."
+      three: "Text split into three columns side by side."
+  textShadow:
+    values: [none, light, dark, darker]
+    description: "Shading behind text on top of media, for legibility."

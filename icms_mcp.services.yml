@@ -11,6 +11,15 @@ services:
       - '@language_manager'
       - '@?paragraphs_blokkli.options_schema_helper'
 
+  icms_mcp.layout_example_index:
+    class: Drupal\icms_mcp\Catalog\LayoutExampleIndex
+    arguments:
+      - '@entity_type.manager'
+      - '@config.factory'
+      - '@icms_mcp.catalog_builder'
+      - '@?menu.link_tree'
+      - '@?plugin.manager.menu.link'
+
   icms_mcp.operations:
     class: Drupal\icms_mcp\Service\IcmsMcpOperations
     arguments:

@@ -18,11 +18,15 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 #[Tool(
   id: 'lookup_existing_node',
   label: new TranslatableMarkup('Lookup existing node'),
-  description: new TranslatableMarkup('Idempotency check: return {nid, content_hash, idempotence_key, changed} of the most recent node previously imported from this source URL, or null.'),
+  description: new TranslatableMarkup('Idempotency check: return {nid, content_hash, idempotence_key, changed, matched_by, url} of the node an import of this source page would land on, or null. matched_by = source_key for a page imported before. With path_alias (or is_front_page) it also finds a page built by hand at the same path: matched_by = alias | front_page, or adopted for one an earlier run was told to keep; importing such a page needs metadata.on_unmanaged = keep | overwrite. bundle_conflict names a hand-built page of another bundle at that path.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [
       'source_url' => ['type' => 'string', 'description' => 'Canonical URL of the source page.'],
+      'path_alias' => ['type' => 'string', 'description' => 'The path the page is imported under; enables the match on a hand-built page.'],
+      'langcode' => ['type' => 'string', 'description' => 'Language of that path (default: any).'],
+      'bundle' => ['type' => 'string', 'description' => 'Node bundle the page is mapped to; a hand-built page of another bundle is reported as bundle_conflict.'],
+      'is_front_page' => ['type' => 'boolean', 'description' => 'The page is the source front page: match the target front page.'],
     ],
     'required' => ['source_url'],
   ],
