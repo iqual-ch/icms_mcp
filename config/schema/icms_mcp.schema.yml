@@ -13,3 +13,20 @@ icms_mcp.catalog_options:
     options:
       type: ignore
       label: 'Option definition overrides keyed by option name'
+
+icms_mcp.catalog_examples:
+  type: config_object
+  label: 'ICMS MCP layout example showcase'
+  mapping:
+    root:
+      type: string
+      label: 'Showcase root page: path alias, node id or node uuid'
+    menu:
+      type: string
+      label: 'Menu the showcase pages are linked in (empty = any)'
+    max_depth:
+      type: integer
+      label: 'How many menu levels below the root are indexed'
+    langcode:
+      type: string
+      label: 'Language the examples are read in (empty = the root page language)'

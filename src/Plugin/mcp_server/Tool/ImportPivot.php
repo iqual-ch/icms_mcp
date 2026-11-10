@@ -18,7 +18,7 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 #[Tool(
   id: 'import_pivot',
   label: new TranslatableMarkup('Import pivot'),
-  description: new TranslatableMarkup('Transactionally import a pivot document. Honours strategy = skip | update | skip-or-update | fail-if-exists. Respects review_decision = review_required (HITL gate) unless approve=true. Returns {status, nid, revision_id, idempotence_key, journal}.'),
+  description: new TranslatableMarkup('Transactionally import a pivot document. Honours strategy = skip | update | skip-or-update | fail-if-exists. Respects review_decision = review_required (HITL gate) unless approve=true. A page built by hand at the same path (matched_by = alias | front_page | adopted) is never written or duplicated silently: metadata.on_unmanaged = keep (only the source key is stamped, action = adopted) or overwrite (its content is replaced); without it the result is status = conflict, code = existing_unmanaged_node. Returns {status, nid, revision_id, idempotence_key, journal}.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [

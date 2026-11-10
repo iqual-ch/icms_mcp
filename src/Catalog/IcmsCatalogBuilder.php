@@ -26,6 +26,11 @@ final class IcmsCatalogBuilder {
 
   private ?array $descriptionCache = NULL;
 
+  /**
+   * The decoded blökkli schema file; FALSE = looked for and not readable.
+   */
+  private array|false|null $schemaCache = NULL;
+
   public function __construct(
     private readonly EntityTypeManagerInterface $entityTypeManager,
     private readonly EntityTypeBundleInfoInterface $bundleInfo,
@@ -242,7 +247,10 @@ final class IcmsCatalogBuilder {
           $schemaOptions = $this->schemaOptions($bundle);
           if ($schemaOptions !== NULL) {
             $entry['optionRefs'] = array_keys($schemaOptions);
-            $entry['optionDefinitions'] = $schemaOptions;
+            // What each value does to the layout is declared, not derived:
+            // the packaged option list and the project's
+            // `icms_mcp.catalog_options` carry `description` / `effects`.
+            $entry['optionDefinitions'] = self::withOptionEffects($schemaOptions, $options, $bundle);
           }
           else {
             $entry['optionRefs'] = str_starts_with($bundle, 'icms_layout_') ? array_keys($options) : [];
@@ -628,32 +636,96 @@ final class IcmsCatalogBuilder {
    *
    * `{name: {type, default, values, label}}`. `values` is what the migration
    * normalises against: the radio/checkbox keys, `[true, false]` for a
-   * checkbox, the integer range for a number. An empty array from the helper
-   * is a bundle the schema knows nothing about, which is also "no schema"
-   * for that bundle (blökkli then offers no options on it).
+   * checkbox, the integer range for a number. NULL only when the site has no
+   * readable schema at all; a bundle the schema does not list has no options
+   * (`[]`), exactly as blökkli offers none on it.
    */
   public function optionDefinitionsForBundle(string $bundle): ?array {
     return $this->schemaOptions($bundle);
   }
 
   private function schemaOptions(string $bundle): ?array {
-    if ($this->schemaHelper === NULL) {
+    $schema = $this->schema();
+    if ($schema === NULL) {
       return NULL;
     }
-    try {
-      $schema = $this->schemaHelper->getOptionsForBundle($bundle);
+    $block = $schema[$bundle] ?? [];
+    return self::definitionsFromSchema(is_array($block) ? $block : []);
+  }
+
+  /**
+   * The whole blökkli schema, keyed by bundle; NULL when the site has none.
+   *
+   * Read here rather than through the blökkli helper, for two reasons. The
+   * helper answers `[]` both for "this bundle has no options" and for "the
+   * schema file could not be read", and the second case must fall back to
+   * the packaged option list instead of advertising a target without any
+   * option. And the helper opens the configured path as it is written: a
+   * relative `schema_file` then only resolves when the working directory is
+   * the docroot, which holds for a web request and not for every CLI call.
+   */
+  private function schema(): ?array {
+    if ($this->schemaCache === NULL) {
+      $this->schemaCache = FALSE;
+      if ($this->schemaHelper !== NULL) {
+        $configured = (string) ($this->configFactory->get('paragraphs_blokkli.settings')->get('schema_file') ?? '');
+        $path = self::resolveSchemaPath($configured, [getcwd() ?: '', defined('DRUPAL_ROOT') ? DRUPAL_ROOT : '']);
+        if ($path !== NULL) {
+          try {
+            $decoded = json_decode((string) file_get_contents($path), TRUE);
+          }
+          catch (\Throwable) {
+            $decoded = NULL;
+          }
+          if (is_array($decoded) && $decoded !== []) {
+            $this->schemaCache = $decoded;
+          }
+        }
+      }
     }
-    catch (\Throwable) {
+    return $this->schemaCache === FALSE ? NULL : $this->schemaCache;
+  }
+
+  /**
+   * The readable file a configured `schema_file` points at, or NULL.
+   *
+   * An absolute path is taken as it is; a relative one is tried against each
+   * base directory in turn.
+   *
+   * @param string $configured
+   *   The `paragraphs_blokkli.settings: schema_file` value.
+   * @param string[] $bases
+   *   Directories a relative path may be relative to.
+   */
+  public static function resolveSchemaPath(string $configured, array $bases): ?string {
+    $configured = trim($configured);
+    if ($configured === '') {
       return NULL;
     }
-    if (!is_array($schema)) {
-      return NULL;
+    $candidates = [$configured];
+    if (!str_starts_with($configured, '/')) {
+      $candidates = [];
+      foreach ($bases as $base) {
+        if ($base !== '') {
+          $candidates[] = rtrim($base, '/') . '/' . $configured;
+        }
+      }
     }
-    return self::definitionsFromSchema($schema);
+    foreach ($candidates as $candidate) {
+      if (is_file($candidate) && is_readable($candidate)) {
+        return $candidate;
+      }
+    }
+    return NULL;
   }
 
   /**
    * Convert one bundle's blökkli schema block to catalog option definitions.
+   *
+   * `values` are the keys the import accepts. `valueLabels` are the words an
+   * editor sees for them in blökkli ("Spotlight"), `displayAs` and `group`
+   * how the editor presents the option: a reviewer picking a value reads the
+   * label, never the key.
    */
   public static function definitionsFromSchema(array $schema): array {
     $definitions = [];
@@ -663,8 +735,15 @@ final class IcmsCatalogBuilder {
       }
       $type = (string) ($spec['type'] ?? 'radios');
       $values = [];
+      $labels = [];
       if (isset($spec['options']) && is_array($spec['options'])) {
         $values = array_map('strval', array_keys($spec['options']));
+        foreach ($spec['options'] as $value => $option) {
+          $label = is_array($option) ? trim((string) ($option['label'] ?? '')) : (is_string($option) ? trim($option) : '');
+          if ($label !== '') {
+            $labels[(string) $value] = $label;
+          }
+        }
       }
       elseif ($type === 'checkbox') {
         $values = [TRUE, FALSE];
@@ -672,15 +751,84 @@ final class IcmsCatalogBuilder {
       elseif ($type === 'number' && isset($spec['min'], $spec['max'])) {
         $values = range((int) $spec['min'], (int) $spec['max']);
       }
-      $definitions[(string) $name] = [
+      $definition = [
         'type' => $type,
         'default' => $spec['default'] ?? NULL,
         'values' => array_values($values),
         'label' => (string) ($spec['label'] ?? $name),
       ];
+      if ($labels !== []) {
+        $definition['valueLabels'] = $labels;
+      }
+      foreach (['displayAs', 'group'] as $key) {
+        if (isset($spec[$key]) && is_string($spec[$key]) && $spec[$key] !== '') {
+          $definition[$key] = $spec[$key];
+        }
+      }
+      $definitions[(string) $name] = $definition;
     }
     ksort($definitions);
     return $definitions;
+  }
+
+  /**
+   * Add the declared `description` and per-value `effects` to a bundle's options.
+   *
+   * `$options` is the merged option list (packaged yml, then the project's
+   * `icms_mcp.catalog_options`, then the alter hook), one entry per option:
+   *
+   * @code
+   * teaserVariant:
+   *   description: "How each teaser is laid out."
+   *   effects:
+   *     spotlight: "Image fills the card, title on top of it."
+   *   bundles:
+   *     example_layout_teasers:
+   *       description: "…"
+   *       effects: { spotlight: "…" }
+   * @endcode
+   *
+   * A bundle entry wins over the option-wide one, value by value: the same
+   * option can lay a card out differently than a teaser. An effect for a
+   * value the bundle does not offer is left out.
+   */
+  public static function withOptionEffects(array $definitions, array $options, string $bundle): array {
+    foreach ($definitions as $name => $definition) {
+      $declared = is_array($options[$name] ?? NULL) ? $options[$name] : [];
+      $specific = is_array($declared['bundles'][$bundle] ?? NULL) ? $declared['bundles'][$bundle] : [];
+      $description = trim((string) ($specific['description'] ?? $declared['description'] ?? ''));
+      if ($description !== '') {
+        $definitions[$name]['description'] = $description;
+      }
+      $effects = [];
+      foreach ([$declared['effects'] ?? [], $specific['effects'] ?? []] as $source) {
+        foreach (is_array($source) ? $source : [] as $value => $text) {
+          $text = is_string($text) ? trim($text) : '';
+          if ($text !== '') {
+            $effects[self::optionValueKey($value)] = $text;
+          }
+        }
+      }
+      $offered = array_map(self::optionValueKey(...), $definition['values'] ?? []);
+      if ($offered !== []) {
+        $effects = array_intersect_key($effects, array_flip($offered));
+      }
+      if ($effects !== []) {
+        ksort($effects);
+        $definitions[$name]['effects'] = $effects;
+      }
+    }
+    return $definitions;
+  }
+
+  /**
+   * An option value as the string key effects and labels are filed under.
+   */
+  public static function optionValueKey(mixed $value): string {
+    if (is_bool($value)) {
+      return $value ? 'true' : 'false';
+    }
+    return (string) $value;
   }
 
   private function descriptions(): array {

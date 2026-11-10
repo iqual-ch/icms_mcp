@@ -148,6 +148,14 @@ final class IcmsMcpOperations {
       if ($toolId === 'get_icms_catalog' || $toolId === md5('get_icms_catalog')) {
         return $this->doGetCatalog();
       }
+      if ($toolId === 'get_icms_layout_examples' || $toolId === md5('get_icms_layout_examples')) {
+        return \Drupal::service('icms_mcp.layout_example_index')->build(
+          $this->layoutsFieldName(),
+          is_array($arguments['bundles'] ?? NULL) ? $arguments['bundles'] : [],
+          (string) ($arguments['langcode'] ?? ''),
+          (int) ($arguments['max_pages'] ?? 60),
+        );
+      }
       if ($toolId === 'get_frontend_theme_files' || $toolId === md5('get_frontend_theme_files')) {
         return $this->doGetFrontendThemeFiles();
       }
@@ -206,7 +214,13 @@ final class IcmsMcpOperations {
         return $result;
       }
       if ($toolId === 'lookup_existing_node' || $toolId === md5('lookup_existing_node')) {
-        return $this->doLookupExistingNode((string) ($arguments['source_url'] ?? ''));
+        return $this->doLookupExistingNode(
+          (string) ($arguments['source_url'] ?? ''),
+          (string) ($arguments['path_alias'] ?? ''),
+          (string) ($arguments['langcode'] ?? ''),
+          (string) ($arguments['bundle'] ?? ''),
+          (bool) ($arguments['is_front_page'] ?? FALSE),
+        );
       }
       if ($toolId === 'rewrite_node_links' || $toolId === md5('rewrite_node_links')) {
         return $this->doRewriteNodeLinks(
@@ -250,11 +264,20 @@ final class IcmsMcpOperations {
 
   /** Return the compact normalized live catalog v2 manifest. */
   protected function doGetCatalog(): array {
-    return $this->catalogBuilder->buildManifest(
+    $manifest = $this->catalogBuilder->buildManifest(
       $this->sourceKeyFieldName(),
       $this->layoutsFieldName(),
       $this->identityFields(),
     );
+    // Additive to v3, and outside `catalogHash` on purpose: whether the site
+    // declares a showcase of its components (see get_icms_layout_examples)
+    // is not part of the content model.
+    $manifest['examples'] = [
+      'configured' => \Drupal::hasService('icms_mcp.layout_example_index')
+        && \Drupal::service('icms_mcp.layout_example_index')->configured(),
+      'tool' => 'get_icms_layout_examples',
+    ];
+    return $manifest;
   }
 
   // ---- Tool: get_frontend_theme_files --------------------------------------
@@ -597,6 +620,7 @@ final class IcmsMcpOperations {
         $strategy,
         $batch_id,
         $run_id,
+        (string) ($metadata['on_unmanaged'] ?? ''),
       );
     }
     finally {
@@ -622,6 +646,7 @@ final class IcmsMcpOperations {
     string $strategy,
     string $batch_id,
     string $run_id,
+    string $on_unmanaged = '',
   ): array {
     $import = $pivot['drupal_import'] ?? [];
     $node_attrs = $import['node']['attributes'] ?? [];
@@ -639,6 +664,83 @@ final class IcmsMcpOperations {
       if ($existing_nid !== NULL) {
         $matched_by = 'identity';
       }
+    }
+
+    // A page this migration never wrote but that already sits at the same
+    // path — built by hand on the target before the migration ran. Creating
+    // a second node would leave two pages fighting over one URL, and writing
+    // into the first without being told to would destroy somebody's work, so
+    // the match is reported and the caller decides (`metadata.on_unmanaged`).
+    // A page kept that way carries the source key from then on and stays
+    // "adopted": a later run still has to say what happens to it.
+    $unmanaged_conflict = NULL;
+    if ($existing_nid !== NULL && $matched_by === 'source_key' && $this->isAdoptedNode($existing_nid)) {
+      $matched_by = 'adopted';
+    }
+    if ($existing_nid === NULL) {
+      [$unmanaged_nid, $unmanaged_by, $unmanaged_conflict] = $this->findUnmanagedNode(
+        $node_bundle,
+        $path_alias,
+        (string) ($node_attrs['langcode'] ?? ''),
+        ($pivot['pivot']['target']['isFrontPage'] ?? FALSE) === TRUE,
+      );
+      if ($unmanaged_nid !== NULL) {
+        $existing_nid = $unmanaged_nid;
+        $matched_by = $unmanaged_by;
+      }
+    }
+    if ($unmanaged_conflict !== NULL) {
+      return $this->journal('conflict', [
+        'code' => 'existing_unmanaged_node_other_bundle',
+        'idempotence_key' => $idempotence_key,
+        'existing' => $unmanaged_conflict,
+        'existing_nid' => $unmanaged_conflict['nid'],
+        'strategy' => $strategy,
+        'batch_id' => $batch_id,
+        'run_id' => $run_id,
+        'dry_run' => $dry_run,
+        'reason' => "A '" . $unmanaged_conflict['bundle'] . "' page that this migration did not write already sits at this path (nid " . $unmanaged_conflict['nid'] . "); this page is mapped to '{$node_bundle}'. Delete or move the existing page, or map the page to its bundle.",
+      ]);
+    }
+    $unmanaged = self::unmanagedDecision($matched_by, $on_unmanaged);
+    if ($unmanaged === 'conflict') {
+      return $this->journal('conflict', [
+        'code' => 'existing_unmanaged_node',
+        'idempotence_key' => $idempotence_key,
+        'existing' => $this->nodeSummary((int) $existing_nid),
+        'existing_nid' => $existing_nid,
+        'matched_by' => $matched_by,
+        'strategy' => $strategy,
+        'batch_id' => $batch_id,
+        'run_id' => $run_id,
+        'dry_run' => $dry_run,
+        'reason' => 'A page this migration did not write already exists at this path. Set metadata.on_unmanaged to "keep" (leave it as it is and link to it) or "overwrite" (replace its content).',
+      ]);
+    }
+    if ($unmanaged === 'keep') {
+      if (!$dry_run) {
+        $this->adoptNode((int) $existing_nid, $idempotence_key, $source_url);
+      }
+      return $this->journal('adopted', [
+        'status' => $dry_run ? 'dry_run_ok' : 'ok',
+        'plan' => 'keep',
+        'kept' => TRUE,
+        'nid' => $existing_nid,
+        'existing_nid' => $existing_nid,
+        'existing' => $this->nodeSummary((int) $existing_nid),
+        'matched_by' => $matched_by,
+        'idempotence_key' => $idempotence_key,
+        'strategy' => $strategy,
+        'batch_id' => $batch_id,
+        'run_id' => $run_id,
+        'dry_run' => $dry_run,
+      ]);
+    }
+    if ($unmanaged === 'overwrite') {
+      // An explicit decision about this one page outranks the run's general
+      // strategy: "fail if it exists" was never meant for a page the
+      // reviewer just chose to replace.
+      $strategy = 'update';
     }
 
     // The idempotency lookup is bundle-scoped, so a page re-imported under a
@@ -752,6 +854,12 @@ final class IcmsMcpOperations {
       $result['action'] = $existing_nid === NULL ? 'created' : 'updated';
       if ($matched_by !== NULL) {
         $result['matched_by'] = $matched_by;
+      }
+      if ($unmanaged === 'overwrite') {
+        // Replaced on purpose: from here on it is an imported page like any
+        // other and later runs update it by source key.
+        $this->forgetAdoptedNode((int) $result['nid']);
+        $result['overwrote_unmanaged'] = TRUE;
       }
       if ($identity_warning !== NULL) {
         $result['warnings'] = array_merge($result['warnings'] ?? [], [$identity_warning]);
@@ -3803,7 +3911,17 @@ final class IcmsMcpOperations {
 
   // ---- Tool: lookup_existing_node ------------------------------------------
 
-  protected function doLookupExistingNode(string $source_url): array {
+  /**
+   * The node an import of this page would land on, or null.
+   *
+   * By source key first (a page this migration imported before). When
+   * `path_alias` or `is_front_page` is given and no key matches, also the
+   * page somebody built by hand at the same path: `matched_by` then says
+   * `alias` or `front_page`, and `adopted` for a hand-built page an earlier
+   * run was told to keep. `bundle_conflict` names a hand-built page of
+   * another bundle at that path, which no import can land on.
+   */
+  protected function doLookupExistingNode(string $source_url, string $path_alias = '', string $langcode = '', string $bundle = '', bool $is_front_page = FALSE): array {
     if ($source_url === '') {
       return ['status' => 'error', 'error' => 'source_url is required.'];
     }
@@ -3826,16 +3944,32 @@ final class IcmsMcpOperations {
         'source_url' => $source_url,
       ];
     }
-    if (!$nids) {
-      return ['status' => 'ok', 'source_url' => $source_url, 'node' => NULL];
+    $node = NULL;
+    $matched_by = NULL;
+    $bundle_conflict = NULL;
+    if ($nids) {
+      $node = $this->entityTypeManager->getStorage('node')->load((int) reset($nids));
+      if ($node !== NULL) {
+        $matched_by = $this->isAdoptedNode((int) $node->id()) ? 'adopted' : 'source_key';
+      }
     }
-    $nid = (int) reset($nids);
-    /** @var \Drupal\node\NodeInterface $node */
-    $node = $this->entityTypeManager->getStorage('node')->load($nid);
+    if ($node === NULL && ($path_alias !== '' || $is_front_page)) {
+      [$unmanaged_nid, $unmanaged_by, $bundle_conflict] = $this->findUnmanagedNode($bundle, $path_alias, $langcode, $is_front_page);
+      if ($unmanaged_nid !== NULL) {
+        $node = $this->entityTypeManager->getStorage('node')->load($unmanaged_nid);
+        $matched_by = $unmanaged_by;
+      }
+    }
     if ($node === NULL) {
-      return ['status' => 'ok', 'source_url' => $source_url, 'node' => NULL];
+      return [
+        'status' => 'ok',
+        'source_url' => $source_url,
+        'node' => NULL,
+        ...($bundle_conflict !== NULL ? ['bundle_conflict' => $bundle_conflict] : []),
+      ];
     }
-    $key = (string) $node->get($source_field)->value;
+    $nid = (int) $node->id();
+    $key = $node->hasField($source_field) ? (string) $node->get($source_field)->value : '';
     $hash = '';
     if (str_contains($key, '#')) {
       [, $hash] = explode('#', $key, 2);
@@ -3851,8 +3985,192 @@ final class IcmsMcpOperations {
         'content_hash' => $hash,
         'changed' => (int) $node->getChangedTime(),
         'title' => $node->label(),
+        'matched_by' => $matched_by,
+        'url' => $this->nodeSummary($nid)['url'],
       ],
     ];
+  }
+
+  // ---- pages that exist before the migration ---------------------------------
+
+  /**
+   * State key: `{nid: {decision, source_url, time}}` for hand-built pages a
+   * run was told to keep.
+   */
+  protected const ADOPTED_STATE = 'icms_mcp.adopted_nodes';
+
+  /**
+   * What an import does with the node it matched.
+   *
+   * `proceed` for no match and for a page this migration wrote itself (the
+   * run's strategy applies as always). A page matched only by its path, or
+   * one an earlier run kept, belongs to somebody else: `keep` or `overwrite`
+   * as the caller asked, `conflict` when it did not say — never a silent
+   * write, never a duplicate.
+   */
+  public static function unmanagedDecision(?string $matched_by, string $on_unmanaged): string {
+    if (!in_array($matched_by, ['alias', 'front_page', 'adopted'], TRUE)) {
+      return 'proceed';
+    }
+    $on_unmanaged = strtolower(trim($on_unmanaged));
+    return in_array($on_unmanaged, ['keep', 'overwrite'], TRUE) ? $on_unmanaged : 'conflict';
+  }
+
+  /**
+   * The internal path an alias lookup should be made for, or '' for none.
+   *
+   * Empty paths, the bare root and system paths (`/node/12`, `/admin/…`)
+   * name no hand-built page: the first two are the front page, which has its
+   * own lookup, and a system path as an alias would capture this site's own
+   * route (see ::applyPathAlias).
+   */
+  public static function aliasLookupPath(string $alias): string {
+    $alias = trim($alias);
+    if ($alias === '') {
+      return '';
+    }
+    $alias = '/' . trim($alias, '/');
+    if ($alias === '/' || self::isSystemPath($alias)) {
+      return '';
+    }
+    return $alias;
+  }
+
+  /**
+   * The node id of an internal `/node/<id>` path, or NULL.
+   */
+  public static function nodeIdFromPath(string $path): ?int {
+    return preg_match('#^/node/(\d+)$#', trim($path), $m) ? (int) $m[1] : NULL;
+  }
+
+  /**
+   * The hand-built node at this page's path, when there is exactly that.
+   *
+   * Returns `[nid, matched_by, conflict]`. A node counts only when it holds
+   * no source key: one that does was imported from another source page, and
+   * is that page's to update. The same path under another bundle is returned
+   * as `conflict` (`{nid, bundle, title, url}`) with no nid — content of one
+   * bundle is never written into a node of another.
+   */
+  protected function findUnmanagedNode(string $bundle, string $path_alias, string $langcode, bool $is_front_page): array {
+    if (!\Drupal::hasService('path_alias.manager')) {
+      return [NULL, NULL, NULL];
+    }
+    $alias_manager = \Drupal::service('path_alias.manager');
+    $langcode = $langcode !== '' ? $langcode : NULL;
+    $internal = '';
+    $matched_by = 'alias';
+    try {
+      if ($is_front_page) {
+        $front = (string) \Drupal::config('system.site')->get('page.front');
+        $internal = $front !== '' ? (string) $alias_manager->getPathByAlias($front, $langcode) : '';
+        $matched_by = 'front_page';
+      }
+      if (self::nodeIdFromPath($internal) === NULL) {
+        $lookup = self::aliasLookupPath($path_alias);
+        $internal = $lookup !== '' ? (string) $alias_manager->getPathByAlias($lookup, $langcode) : '';
+        $matched_by = 'alias';
+      }
+    }
+    catch (\Throwable $e) {
+      $this->logger->warning('icms_mcp:findUnmanagedNode failed: @msg', ['@msg' => $e->getMessage()]);
+      return [NULL, NULL, NULL];
+    }
+    $nid = self::nodeIdFromPath($internal);
+    if ($nid === NULL) {
+      return [NULL, NULL, NULL];
+    }
+    $node = $this->entityTypeManager->getStorage('node')->load($nid);
+    if ($node === NULL) {
+      return [NULL, NULL, NULL];
+    }
+    $source_field = $this->sourceKeyFieldName();
+    if ($node->hasField($source_field) && !$node->get($source_field)->isEmpty()) {
+      return [NULL, NULL, NULL];
+    }
+    if ($bundle !== '' && $node->bundle() !== $bundle) {
+      return [NULL, NULL, $this->nodeSummary($nid)];
+    }
+    return [$nid, $matched_by, NULL];
+  }
+
+  /**
+   * `{nid, bundle, title, status, changed, url}` of a node, for a reviewer.
+   */
+  protected function nodeSummary(int $nid): array {
+    $node = $this->entityTypeManager->getStorage('node')->load($nid);
+    if ($node === NULL) {
+      return ['nid' => $nid, 'bundle' => '', 'title' => '', 'url' => ''];
+    }
+    try {
+      $url = $node->toUrl('canonical', ['absolute' => TRUE])->toString();
+    }
+    catch (\Throwable) {
+      $url = '';
+    }
+    return [
+      'nid' => $nid,
+      'bundle' => $node->bundle(),
+      'title' => (string) $node->label(),
+      'status' => $node->isPublished(),
+      'changed' => (int) $node->getChangedTime(),
+      'url' => $url,
+    ];
+  }
+
+  /**
+   * Keep a hand-built page: give it this page's source key and remember it.
+   *
+   * Nothing else on the node is touched. The key is what makes the rest of
+   * the migration find it — menu links, references and in-text links to the
+   * source page resolve to this node exactly as if it had been imported.
+   */
+  protected function adoptNode(int $nid, string $idempotence_key, string $source_url): void {
+    $storage = $this->entityTypeManager->getStorage('node');
+    $storage->resetCache([$nid]);
+    /** @var \Drupal\node\NodeInterface|null $node */
+    $node = $storage->load($nid);
+    if ($node === NULL) {
+      throw new \RuntimeException("Existing node {$nid} disappeared between lookup and write.");
+    }
+    $source_field = $this->sourceKeyFieldName();
+    if (!$node->hasField($source_field)) {
+      icms_mcp_ensure_source_key_field($node->bundle());
+      $storage->resetCache([$nid]);
+      $node = $storage->load($nid);
+    }
+    $node = $node->getUntranslated();
+    if ((string) $node->get($source_field)->value !== $idempotence_key) {
+      $node->set($source_field, $this->normalizeFieldValue($node->getFieldDefinition($source_field), $idempotence_key));
+      $node->setNewRevision(FALSE);
+      $node->save();
+    }
+    $adopted = $this->adoptedNodes();
+    $adopted[$nid] = ['decision' => 'keep', 'source_url' => $source_url, 'time' => $this->time->getRequestTime()];
+    $this->state->set(self::ADOPTED_STATE, $adopted);
+  }
+
+  /**
+   * Whether an earlier run was told to keep this hand-built node.
+   */
+  protected function isAdoptedNode(int $nid): bool {
+    return isset($this->adoptedNodes()[$nid]);
+  }
+
+  /**
+   * Stop treating a node as hand-built (it was overwritten on purpose).
+   */
+  protected function forgetAdoptedNode(int $nid): void {
+    $adopted = $this->adoptedNodes();
+    if (isset($adopted[$nid])) {
+      unset($adopted[$nid]);
+      $this->state->set(self::ADOPTED_STATE, $adopted);
+    }
+  }
+
+  protected function adoptedNodes(): array {
+    $adopted = $this->state->get(self::ADOPTED_STATE, []);
+    return is_array($adopted) ? $adopted : [];
   }
 
   // ---- helpers -------------------------------------------------------------
