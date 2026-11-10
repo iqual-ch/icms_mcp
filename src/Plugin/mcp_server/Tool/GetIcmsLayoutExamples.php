@@ -17,7 +17,7 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 #[Tool(
   id: 'get_icms_layout_examples',
   label: new TranslatableMarkup('Get ICMS layout examples'),
-  description: new TranslatableMarkup('The site\'s reference examples of each layout bundle and option combination, read from the showcase page declared in icms_mcp.catalog_examples and its menu children. Returns {status, format, indexHash, pages, examples: [{id, bundle, options, storedOptions, pageNid, pagePath, ordinal, siblingCount, title, children}], skipped}. ordinal is the 1-based position of the section among the page\'s published top-level layouts, so it can be located on the public page. Only pages an anonymous visitor can open are listed. status = not_configured when no root is declared.'),
+  description: new TranslatableMarkup('The site\'s reference examples of each layout bundle and option combination, read from the showcase page declared in icms_mcp.catalog_examples and its menu children. Returns {status, format, indexHash, pages, examples: [{id, paragraphId, bundle, options, storedOptions, pageNid, pagePath, ordinal, siblingCount, title, children}], skipped}. paragraphId is the element id the ICMS frontend renders the section with; ordinal is its 1-based position among the page\'s published top-level layouts. Either locates it on the public page. Only pages an anonymous visitor can open are listed. status = not_configured when no root is declared.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [

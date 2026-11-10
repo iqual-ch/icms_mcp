@@ -17,7 +17,7 @@ Tools (`src/Plugin/mcp_server/Tool/`), advertised under their tool id:
 | `import_taxonomy_terms`  | Upsert one vocabulary's terms (uuid/name identity, hierarchy, translations). Step 3, before nodes. |
 | `import_menu_links`      | Upsert one menu's links, parents before children; node links resolve via the source-key field, and a parent whose page is missing is kept disabled so its children keep their place. Step 3, after nodes. |
 | `lookup_existing_node`   | The node an import of a source page would land on: by canonical source URL (the source-key field), and with `path_alias` / `is_front_page` also a page built by hand at the same path (`matched_by: alias \| front_page \| adopted`). |
-| `get_icms_layout_examples` | Read-only: the site's reference examples of each layout bundle and option combination, from the showcase page declared in `icms_mcp.catalog_examples` and its menu children. `{indexHash, pages, examples: [{id, bundle, options, storedOptions, pagePath, ordinal, siblingCount, title, children}], skipped}`. |
+| `get_icms_layout_examples` | Read-only: the site's reference examples of each layout bundle and option combination, from the showcase page declared in `icms_mcp.catalog_examples` and its menu children. `{indexHash, pages, examples: [{id, paragraphId, bundle, options, storedOptions, pagePath, ordinal, siblingCount, title, children}], skipped}`. |
 | `rewrite_node_links`     | Post-import pass: `{from, to}` replacements applied to `href`s in text fields and link-field uris (exact, or by resolved `#fragment`) on the node, its translations and its paragraphs. Anchors → `#<paragraph id>`, document links → the stored file's URL. |
 | `set_front_page`         | Make an imported, published node the site front page (`system.site page.front`). |
 | `update_node_references` | Final reference pass: path-addressed write of `entity_reference` / `link` fields on the node or a (nested) paragraph (`{langcode?, path: [{field?, index}], expect_bundle?, field, value}`), translation-aware, saved only on change, one transaction, idempotent. Lets a page imported before the pages it references get its teasers and buttons without a re-import (which would recreate paragraph ids). |
@@ -129,8 +129,9 @@ langcode: ''           # empty = the root page's language
 `get_icms_layout_examples` then lists every published top-level layout
 paragraph on the root and its menu children: its bundle, the options it renders
 with (schema defaults, then what is stored, typed), the page's public path and
-its 1-based `ordinal` among the page's published layouts, so the section can be
-found on the public page. Only pages an anonymous visitor can open are listed;
+its `paragraphId` (the ICMS frontend renders a layout as
+`<section id="<paragraph id>">`) and its 1-based `ordinal` among the page's
+published layouts, so the section can be found on the public page. Only pages an anonymous visitor can open are listed;
 the rest is reported under `skipped`. `indexHash` changes when an example
 moves, appears, disappears or changes options. The catalog reports
 `examples.configured`.

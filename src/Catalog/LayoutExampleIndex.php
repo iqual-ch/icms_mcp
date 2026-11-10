@@ -19,8 +19,8 @@ use Drupal\node\NodeInterface;
  * A project that builds a showcase — one page per component, one section per
  * option combination — declares its root page in `icms_mcp.catalog_examples`.
  * This walks that page and its menu children and lists every top-level
- * layout paragraph with the options it is stored with and where it sits on
- * the page, so a migration can show (and screenshot) what a bundle with a
+ * layout paragraph with the options it is stored with, its id and where it
+ * sits on the page, so a migration can show (and screenshot) what a bundle with a
  * given set of options actually looks like instead of guessing from a name.
  *
  * Only what an anonymous visitor can open is listed: the examples are meant
@@ -149,6 +149,9 @@ final class LayoutExampleIndex {
         $stored = self::storedOptions($view);
         $examples[] = [
           'id' => (string) $view->uuid(),
+          // The ICMS frontend renders a layout as `<section id="<paragraph
+          // id>">`: the surest way to find it again on the public page.
+          'paragraphId' => (int) $view->id(),
           'bundle' => $bundle,
           'options' => self::effectiveOptions($stored, $definitionCache[$bundle]),
           'storedOptions' => $stored,
