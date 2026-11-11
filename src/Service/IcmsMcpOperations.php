@@ -231,6 +231,12 @@ final class IcmsMcpOperations {
       if ($toolId === 'set_front_page' || $toolId === md5('set_front_page')) {
         return $this->doSetFrontPage((int) ($arguments['nid'] ?? 0));
       }
+      if ($toolId === 'delete_preview_pages' || $toolId === md5('delete_preview_pages')) {
+        return $this->doDeletePreviewPages(
+          (string) ($arguments['scope'] ?? ''),
+          (bool) ($arguments['dry_run'] ?? FALSE),
+        );
+      }
       if ($toolId === 'update_node_references' || $toolId === md5('update_node_references')) {
         return $this->doUpdateNodeReferences(
           (int) ($arguments['nid'] ?? 0),
@@ -4201,6 +4207,79 @@ final class IcmsMcpOperations {
       $this->logger->warning('icms_mcp:findNodeBySourceUrl failed: @msg', ['@msg' => $e->getMessage()]);
       return NULL;
     }
+  }
+
+  // ---- Tool: delete_preview_pages -------------------------------------------
+
+  /**
+   * Host of the source URL a preview page is imported with. `.invalid` is
+   * reserved (RFC 2606): no real source page can ever carry it, so a node
+   * whose source key starts with it was written as a preview and nothing else.
+   */
+  public const PREVIEW_SOURCE_HOST = 'icms-preview.invalid';
+
+  /**
+   * The source-key prefix of one scope's preview pages, or '' for a scope
+   * that is not a plain token.
+   *
+   * A preview page is an ordinary `import_pivot` whose source URL is
+   * `https://icms-preview.invalid/<scope>/<name>`. The scope (a run id) keeps
+   * two reviewers' previews apart; it must be a token of letters, digits,
+   * `_` and `-`, at least six long, so a prefix can never be widened to
+   * "every preview" or, worse, to nothing.
+   */
+  public static function previewKeyPrefix(string $scope): string {
+    if (preg_match('/^[A-Za-z0-9_-]{6,128}$/', $scope) !== 1) {
+      return '';
+    }
+    return 'https://' . self::PREVIEW_SOURCE_HOST . '/' . $scope . '/';
+  }
+
+  /**
+   * Delete the preview pages of one scope.
+   *
+   * Only nodes whose source key starts with that scope's preview prefix are
+   * touched: content a migration imported from a real source, and pages built
+   * by hand, carry no such key and cannot be reached from here.
+   */
+  protected function doDeletePreviewPages(string $scope, bool $dry_run): array {
+    $prefix = self::previewKeyPrefix($scope);
+    if ($prefix === '') {
+      return [
+        'status' => 'error',
+        'error' => 'scope must be 6 to 128 letters, digits, "_" or "-".',
+      ];
+    }
+    $storage = $this->entityTypeManager->getStorage('node');
+    $nids = array_map('intval', array_values($storage->getQuery()
+      ->accessCheck(FALSE)
+      ->condition($this->sourceKeyFieldName(), $prefix, 'STARTS_WITH')
+      ->execute()));
+    if ($dry_run || $nids === []) {
+      return [
+        'status' => 'ok',
+        'scope' => $scope,
+        'dry_run' => $dry_run,
+        'matched' => count($nids),
+        'deleted' => 0,
+        'nids' => $nids,
+      ];
+    }
+    $deleted = [];
+    foreach (array_chunk($nids, 50) as $chunk) {
+      $nodes = $storage->loadMultiple($chunk);
+      $storage->delete($nodes);
+      array_push($deleted, ...array_map('intval', array_keys($nodes)));
+    }
+    $this->journal('preview_pages_deleted', ['scope' => $scope, 'nids' => $deleted]);
+    return [
+      'status' => 'ok',
+      'scope' => $scope,
+      'dry_run' => FALSE,
+      'matched' => count($nids),
+      'deleted' => count($deleted),
+      'nids' => $deleted,
+    ];
   }
 
   /**
