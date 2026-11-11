@@ -20,6 +20,7 @@ Tools (`src/Plugin/mcp_server/Tool/`), advertised under their tool id:
 | `get_icms_layout_examples` | Read-only: the site's reference examples of each layout bundle and option combination, from the showcase page declared in `icms_mcp.catalog_examples` and its menu children. `{indexHash, pages, examples: [{id, paragraphId, bundle, options, storedOptions, pagePath, ordinal, siblingCount, title, children}], skipped}`. |
 | `rewrite_node_links`     | Post-import pass: `{from, to}` replacements applied to `href`s in text fields and link-field uris (exact, or by resolved `#fragment`) on the node, its translations and its paragraphs. Anchors → `#<paragraph id>`, document links → the stored file's URL. |
 | `set_front_page`         | Make an imported, published node the site front page (`system.site page.front`). |
+| `delete_preview_pages`   | Delete the preview pages of one scope (see *Preview pages*). |
 | `update_node_references` | Final reference pass: path-addressed write of `entity_reference` / `link` fields on the node or a (nested) paragraph (`{langcode?, path: [{field?, index}], expect_bundle?, field, value}`), translation-aware, saved only on change, one transaction, idempotent. Lets a page imported before the pages it references get its teasers and buttons without a re-import (which would recreate paragraph ids). |
 | `read_node`              | Read back a node per language: `{status, title, path_alias, fields, paragraphs: [{id, sequence, bundle, translated, status, fields, children}]}`, references with their labels, booleans as `true`/`false`. For checking what landed against what was sent (job title, publication type, per-language paragraph status). |
 
@@ -135,6 +136,31 @@ published layouts, so the section can be found on the public page. Only pages an
 the rest is reported under `skipped`. `indexHash` changes when an example
 moves, appears, disappears or changes options. The catalog reports
 `examples.configured`.
+
+
+## Preview pages
+
+A reviewer deciding which layout a kind of source section becomes wants to see
+that section in the layout, not a showcase example. A client does that with
+the tools it already has:
+
+1. `import_pivot` a page that holds the one section, with the source URL
+   `https://icms-preview.invalid/<scope>/<name>` and a path alias out of the
+   way (`/migration-preview/<scope>/<name>`), published so a browser can load
+   it.
+2. Load the page and look at it.
+3. `delete_preview_pages` with the same `scope`.
+
+`<scope>` is a token of letters, digits, `_` and `-`, six or more long,
+typically a run id. `delete_preview_pages` deletes the nodes whose source key
+starts with that scope's prefix and nothing else: `.invalid` is a reserved
+host, so no page imported from a real source and no page built by hand can
+carry such a key. Media a preview imported stays; a later import of the real
+page reuses it.
+
+While they exist, preview pages are published content: listings, the sitemap
+and the search index may show them. Delete them as soon as they have been
+looked at, and use previews on a preview environment, not on production.
 
 ## Behaviour summary
 
