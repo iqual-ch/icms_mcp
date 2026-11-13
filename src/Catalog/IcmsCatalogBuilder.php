@@ -237,6 +237,9 @@ final class IcmsCatalogBuilder {
           'capabilities' => $this->capabilities($fields, $editorial),
           'contentTranslationEnabled' => $this->contentTranslationEnabled($entityType, $bundle),
         ];
+        if ($entityType === 'node') {
+          $entry['pageFields'] = self::pageFieldsFromEditorial($editorial);
+        }
         if ($entityType === 'paragraph') {
           $entry['role'] = (string) ($editorial['role'] ?? 'component');
           // The bundle's real options come from the frontend-generated blökkli
@@ -587,6 +590,27 @@ final class IcmsCatalogBuilder {
       }
     }
     return $patterns;
+  }
+
+  /**
+   * Node fields a node type's page shows itself, outside the paragraphs.
+   *
+   * `pageFields: [body]` on a node type's description entry says that this
+   * project's page template renders that field on the page (a lead above the
+   * content). The content migrator then leaves the field's content in the
+   * field; without the declaration it assumes the page shows paragraphs only
+   * and repeats such content as a paragraph. Field names are trimmed and
+   * de-duplicated.
+   */
+  public static function pageFieldsFromEditorial(array $editorial): array {
+    $fields = [];
+    foreach ((array) ($editorial['pageFields'] ?? []) as $item) {
+      $name = trim((string) $item);
+      if ($name !== '' && !in_array($name, $fields, TRUE)) {
+        $fields[] = $name;
+      }
+    }
+    return $fields;
   }
 
   /**
