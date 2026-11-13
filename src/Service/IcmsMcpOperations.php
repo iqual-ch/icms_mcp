@@ -1191,13 +1191,20 @@ final class IcmsMcpOperations {
    * be matched and is reported rather than guessed at; its pages stay with the
    * importing account.
    *
-   * Accounts are created BLOCKED and without a password: this imports
-   * authorship, not access. Anyone who should be able to log in is unblocked
-   * deliberately, by a human. No notification mail is ever sent — a migration
-   * must not e-mail a customer's editors.
+   * An account is created as the source has it: active when it is active
+   * there, blocked otherwise — a blocked account is hidden from visitors, and
+   * with it the author of every page it owns. It is created without a
+   * password, so being active gives no access by itself: its owner gets in
+   * only through a password reset. No notification mail is ever sent — a
+   * migration must not e-mail a customer's editors.
+   *
+   * What a site shows of an author travels along: `first_name` / `last_name`
+   * fill the account's fields named that way, `picture` fills `user_picture`.
+   * Only empty fields are filled; a field the target lacks is skipped.
    *
    * @param array $users
-   *   Source accounts: {uid, uuid, name, mail, status, roles, created}.
+   *   Source accounts: {uid, uuid, name, mail, status, roles, created,
+   *   first_name?, last_name?, picture?: {url, alt?}}.
    * @param array $role_mapping
    *   Source role id → target role id, as confirmed at the migration's role
    *   gate. A source role absent from the mapping, or mapped to a role this
@@ -1224,6 +1231,8 @@ final class IcmsMcpOperations {
       $mail = trim((string) ($spec['mail'] ?? ''));
       $name = trim((string) ($spec['name'] ?? ''));
       $source_uid = (int) ($spec['uid'] ?? 0);
+      $source_active = !empty($spec['status']);
+      $activated = FALSE;
       if ($mail === '') {
         $results[] = [
           'uid' => $source_uid,
@@ -1256,7 +1265,7 @@ final class IcmsMcpOperations {
         $values = [
           'name' => $this->availableUserName($name !== '' ? $name : $mail, $user_storage),
           'mail' => $mail,
-          'status' => 0,
+          'status' => $source_active ? 1 : 0,
         ];
         if ((int) ($spec['created'] ?? 0) > 0) {
           $values['created'] = (int) $spec['created'];
@@ -1272,7 +1281,15 @@ final class IcmsMcpOperations {
         // the migration's: never rename it and never change whether it can log
         // in. Only the roles this migration is responsible for are added.
         $action = 'matched';
+        // The one exception is an account an earlier import made: it has no
+        // password and nobody ever logged in with it. It follows the source,
+        // like a new one would.
+        if ($source_active && !$account->isActive() && self::isImportMadeAccount((string) $account->getPassword(), (int) $account->getLastLoginTime())) {
+          $account->activate();
+          $activated = TRUE;
+        }
       }
+      $profile = $this->fillAuthorProfile($account, $spec);
       foreach ($target_roles as $role_id) {
         if (!$account->hasRole($role_id)) {
           $account->addRole($role_id);
@@ -1288,7 +1305,8 @@ final class IcmsMcpOperations {
         'mail' => $mail,
         'roles' => $target_roles,
         'action' => $action,
-      ];
+        'active' => $account->isActive(),
+      ] + ($activated ? ['activated' => TRUE] : []) + ($profile ? ['profile' => $profile] : []);
     }
 
     $created = 0;
@@ -1311,6 +1329,75 @@ final class IcmsMcpOperations {
       'source_uid_map' => $by_source_uid,
       'users' => $results,
     ];
+  }
+
+  /**
+   * Whether an account was made by an earlier import and never used.
+   *
+   * Such an account has no password and no login. Anything else is the
+   * customer's account and keeps its status.
+   */
+  public static function isImportMadeAccount(string $password, int $last_login): bool {
+    return $password === '' && $last_login === 0;
+  }
+
+  /**
+   * The account field that holds one part of a person's name.
+   *
+   * Sites name it differently (`field_user_first_name`, `field_firstname`),
+   * so it is found by how the field name ends.
+   *
+   * @param string[] $field_names
+   *   The account's field names.
+   * @param string $part
+   *   `first` or `last`.
+   */
+  public static function nameFieldFor(array $field_names, string $part): ?string {
+    foreach ($field_names as $field_name) {
+      if (preg_match('/(^|_)' . preg_quote($part, '/') . '_?name$/', (string) $field_name)) {
+        return (string) $field_name;
+      }
+    }
+    return NULL;
+  }
+
+  /**
+   * Fill what the site shows of an author: name parts and portrait.
+   *
+   * Only empty fields are filled, so a value an editor set on the target
+   * stays. Returns the names of the fields it filled.
+   */
+  protected function fillAuthorProfile($account, array $spec): array {
+    $filled = [];
+    $text_fields = [];
+    foreach ($account->getFieldDefinitions() as $field_name => $definition) {
+      if (in_array($definition->getType(), ['string', 'text'], TRUE)) {
+        $text_fields[] = $field_name;
+      }
+    }
+    foreach (['first' => 'first_name', 'last' => 'last_name'] as $part => $key) {
+      $value = trim((string) ($spec[$key] ?? ''));
+      $field_name = $value !== '' ? self::nameFieldFor($text_fields, $part) : NULL;
+      if ($field_name !== NULL && $account->get($field_name)->isEmpty()) {
+        $account->set($field_name, $value);
+        $filled[] = $field_name;
+      }
+    }
+    $picture = is_array($spec['picture'] ?? NULL) ? $spec['picture'] : [];
+    $url = trim((string) ($picture['url'] ?? ''));
+    if ($url !== '' && $account->hasField('user_picture') && $account->get('user_picture')->isEmpty()) {
+      try {
+        $file = $this->downloadRemoteFile($url);
+        $account->set('user_picture', ['target_id' => $file->id(), 'alt' => (string) ($picture['alt'] ?? '')]);
+        $filled[] = 'user_picture';
+      }
+      catch (\Throwable $e) {
+        // A portrait that cannot be fetched must not cost the account: the
+        // pages still need their owner.
+        $this->logger->warning('User picture @url was not imported: @message', ['@url' => $url, '@message' => $e->getMessage()]);
+      }
+    }
+    return $filled;
   }
 
   /**
