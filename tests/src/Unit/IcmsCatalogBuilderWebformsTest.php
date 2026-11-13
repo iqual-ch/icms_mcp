@@ -12,7 +12,7 @@ use Drupal\Tests\UnitTestCase;
 final class IcmsCatalogBuilderWebformsTest extends UnitTestCase {
 
   /**
-   * The catalog lists the target's forms by id and label, skipping the
+   * The catalog lists the target's forms by id, label and uuid, skipping the
    * module's own example and template forms, so the section gate can offer
    * them beside the imported source forms.
    *
@@ -27,8 +27,8 @@ final class IcmsCatalogBuilderWebformsTest extends UnitTestCase {
     ]);
 
     self::assertSame([
-      ['id' => 'anmeldung', 'label' => 'Anmeldung'],
-      ['id' => 'kontakt', 'label' => 'Kontaktformular'],
+      ['id' => 'anmeldung', 'label' => 'Anmeldung', 'uuid' => 'uuid-anmeldung'],
+      ['id' => 'kontakt', 'label' => 'Kontaktformular', 'uuid' => 'uuid-kontakt'],
     ], $entries);
   }
 
@@ -36,6 +36,7 @@ final class IcmsCatalogBuilderWebformsTest extends UnitTestCase {
     $entity = $this->createMock(EntityInterface::class);
     $entity->method('id')->willReturn($id);
     $entity->method('label')->willReturn($label);
+    $entity->method('uuid')->willReturn('uuid-' . $id);
     return $entity;
   }
 
