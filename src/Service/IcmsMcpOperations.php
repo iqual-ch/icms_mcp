@@ -981,6 +981,7 @@ final class IcmsMcpOperations {
           0,
           $paragraph_langcode,
         );
+        $this->copyFieldsFromPage($entity, $node);
         $created_paragraphs[] = [
           'target_id' => $entity->id(),
           'target_revision_id' => $entity->getRevisionId(),
@@ -2573,6 +2574,77 @@ final class IcmsMcpOperations {
 
     $entity->save();
     return $entity;
+  }
+
+  /**
+   * Fill a section's empty fields the project says come from its page.
+   *
+   * A component that lists "what belongs to this page" (the products of the
+   * page's own industry) needs the page's term on the section. The source
+   * has no such value to migrate: there the list read it from the page.
+   * The project declares the pairing on the bundle's description entry:
+   *
+   * @code
+   * # icms_mcp.catalog_descriptions
+   * descriptions:
+   *   paragraph:
+   *     example_layout_related:
+   *       fieldsFromPage:
+   *         field_example_topic: field_page_topic
+   * @endcode
+   *
+   * Only an empty section field is filled, only from a page field that has a
+   * value, and only when both fields hold the same kind of value. A value
+   * the import sent is never replaced.
+   */
+  protected function copyFieldsFromPage(
+    \Drupal\paragraphs\ParagraphInterface $paragraph,
+    \Drupal\Core\Entity\FieldableEntityInterface $page,
+  ): void {
+    $declared = \Drupal::config('icms_mcp.catalog_descriptions')
+      ->get('descriptions.paragraph.' . $paragraph->bundle() . '.fieldsFromPage');
+    $copied = FALSE;
+    foreach (self::fieldsFromPageMap($declared) as $field => $page_field) {
+      if (!$paragraph->hasField($field) || !$page->hasField($page_field)) {
+        continue;
+      }
+      if (!$paragraph->get($field)->isEmpty() || $page->get($page_field)->isEmpty()) {
+        continue;
+      }
+      $target = $paragraph->getFieldDefinition($field);
+      $source = $page->getFieldDefinition($page_field);
+      if ($target->getType() !== $source->getType()
+        || $target->getSetting('target_type') !== $source->getSetting('target_type')) {
+        continue;
+      }
+      $values = $page->get($page_field)->getValue();
+      $cardinality = $target->getFieldStorageDefinition()->getCardinality();
+      if ($cardinality > 0) {
+        $values = array_slice($values, 0, $cardinality);
+      }
+      $paragraph->set($field, $values);
+      $copied = TRUE;
+    }
+    if ($copied) {
+      $paragraph->save();
+    }
+  }
+
+  /**
+   * The declared `fieldsFromPage` pairs: section field => page field.
+   *
+   * @return array<string, string>
+   */
+  public static function fieldsFromPageMap(mixed $declared): array {
+    $map = [];
+    foreach (is_array($declared) ? $declared : [] as $field => $page_field) {
+      $field = is_string($field) ? trim($field) : '';
+      $page_field = is_string($page_field) ? trim($page_field) : '';
+      if ($field !== '' && $page_field !== '') {
+        $map[$field] = $page_field;
+      }
+    }
+    return $map;
   }
 
   /**

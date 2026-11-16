@@ -87,6 +87,25 @@ content). The catalog passes it on as `nodeTypes.<bundle>.pageFields`; the
 migrator then leaves that content in the field instead of repeating it as a
 paragraph. Without it a page is assumed to show its paragraphs only.
 
+### Section fields that come from the page
+
+A component that lists what belongs to its page (the products of the page's
+own industry) needs the page's term on the section. A source site has no
+such value to migrate. The project declares the pairing on the bundle:
+
+```yaml
+# icms_mcp.catalog_descriptions
+descriptions:
+  paragraph:
+    example_layout_related:
+      fieldsFromPage:
+        field_example_topic: field_page_topic   # section field: page field
+```
+
+When a page is imported, each top-level section of that bundle gets the
+page's value in that field, if the field is empty, the page has a value and
+both fields hold the same kind of value. A value the import sent is kept.
+
 ### Options: what each value does
 
 On a site with a blökkli schema file (`paragraphs_blokkli.settings: schema_file`)
