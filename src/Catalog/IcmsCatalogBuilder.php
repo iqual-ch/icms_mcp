@@ -74,7 +74,7 @@ final class IcmsCatalogBuilder {
   }
 
   /**
-   * `[{id, label}]` for webform config entities, sorted by id; example and
+   * `[{id, label, uuid}]` for webform config entities, sorted by id; example and
    * template forms the module ships are left out.
    *
    * @param iterable<\Drupal\Core\Entity\EntityInterface> $webforms
@@ -87,7 +87,9 @@ final class IcmsCatalogBuilder {
       if ($id === '' || str_starts_with($id, 'example_') || str_starts_with($id, 'template_')) {
         continue;
       }
-      $entries[$id] = ['id' => $id, 'label' => (string) $webform->label()];
+      // The uuid tells a form an import made (the source's uuid) from
+      // another form that only shares the id.
+      $entries[$id] = ['id' => $id, 'label' => (string) $webform->label(), 'uuid' => (string) $webform->uuid()];
     }
     ksort($entries);
     return array_values($entries);
