@@ -1234,7 +1234,12 @@ final class IcmsMcpOperations {
       $source_uid = (int) ($spec['uid'] ?? 0);
       $source_active = !empty($spec['status']);
       $activated = FALSE;
-      if ($mail === '') {
+      // The account this person already has here: by e-mail, else by
+      // username. A username is unique on a site, and a second account for
+      // the same login ("name-2") is a duplicate nobody asked for.
+      $account = $this->findAccount($mail, $name);
+      $matched_by = $account === NULL ? '' : self::accountMatchedBy($mail, (string) $account->getEmail());
+      if ($account === NULL && $mail === '') {
         $results[] = [
           'uid' => $source_uid,
           'name' => $name,
@@ -1259,9 +1264,6 @@ final class IcmsMcpOperations {
         $target_roles[] = $mapped;
       }
 
-      $matches = $user_storage->loadByProperties(['mail' => $mail]);
-      $account = $matches ? reset($matches) : NULL;
-
       if ($account === NULL) {
         $values = [
           'name' => $this->availableUserName($name !== '' ? $name : $mail, $user_storage),
@@ -1279,8 +1281,9 @@ final class IcmsMcpOperations {
       }
       else {
         // An account that already exists on the target is the customer's, not
-        // the migration's: never rename it and never change whether it can log
-        // in. Only the roles this migration is responsible for are added.
+        // the migration's: never rename it, never change its e-mail and never
+        // change whether it can log in. Only the roles this migration is
+        // responsible for are added.
         $action = 'matched';
         // The one exception is an account an earlier import made: it has no
         // password and nobody ever logged in with it. It follows the source,
@@ -1307,7 +1310,8 @@ final class IcmsMcpOperations {
         'roles' => $target_roles,
         'action' => $action,
         'active' => $account->isActive(),
-      ] + ($activated ? ['activated' => TRUE] : []) + ($profile ? ['profile' => $profile] : []);
+      ] + ($matched_by !== '' ? ['matchedBy' => $matched_by] : [])
+        + ($activated ? ['activated' => TRUE] : []) + ($profile ? ['profile' => $profile] : []);
     }
 
     $created = 0;
@@ -1714,23 +1718,52 @@ final class IcmsMcpOperations {
   }
 
   /**
-   * The target uid for a `{email, name}` owner, or NULL to leave it alone.
+   * The target uid for a `{email, username, name}` owner, or NULL.
    *
-   * By e-mail only. A name is not an identity — two people share one, and
-   * matching on it would hand a customer's pages to the wrong account. When an
-   * owner cannot be resolved the node keeps the importing account, which is
-   * the honest outcome: authorship missing, not authorship wrong.
+   * By e-mail, else by username (`username`, or `name` when the caller sends
+   * no username): the account the person has on this site owns the content,
+   * whatever uid it had on the source. A username is unique on a site; a
+   * display name is not, which is why `username` is preferred when sent.
+   * When an owner cannot be resolved the node keeps the importing account:
+   * authorship missing, not authorship wrong.
    */
   protected function resolveOwnerUid(array $owner): ?int {
-    $mail = trim((string) ($owner['email'] ?? $owner['mail'] ?? ''));
-    if ($mail === '' || !$this->entityTypeManager->hasDefinition('user')) {
+    if (!$this->entityTypeManager->hasDefinition('user')) {
       return NULL;
     }
-    $matches = $this->entityTypeManager->getStorage('user')->loadByProperties(['mail' => $mail]);
-    if (!$matches) {
-      return NULL;
+    $account = $this->findAccount(
+      trim((string) ($owner['email'] ?? $owner['mail'] ?? '')),
+      trim((string) ($owner['username'] ?? $owner['name'] ?? '')),
+    );
+    return $account === NULL ? NULL : (int) $account->id();
+  }
+
+  /**
+   * The account with this e-mail, else the one with this username.
+   *
+   * The anonymous account (uid 0) is never an answer.
+   */
+  protected function findAccount(string $mail, string $name): ?\Drupal\user\UserInterface {
+    $storage = $this->entityTypeManager->getStorage('user');
+    foreach (['mail' => $mail, 'name' => $name] as $property => $value) {
+      if ($value === '') {
+        continue;
+      }
+      foreach ($storage->loadByProperties([$property => $value]) as $account) {
+        if ((int) $account->id() > 0) {
+          return $account;
+        }
+      }
     }
-    return (int) reset($matches)->id();
+    return NULL;
+  }
+
+  /**
+   * How a found account was recognised: `mail`, or `name` when the e-mails differ.
+   */
+  public static function accountMatchedBy(string $source_mail, string $account_mail): string {
+    $source_mail = mb_strtolower(trim($source_mail));
+    return $source_mail !== '' && $source_mail === mb_strtolower(trim($account_mail)) ? 'mail' : 'name';
   }
 
   /**
