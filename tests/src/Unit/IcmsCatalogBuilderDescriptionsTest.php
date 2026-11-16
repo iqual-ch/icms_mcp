@@ -61,4 +61,19 @@ final class IcmsCatalogBuilderDescriptionsTest extends UnitTestCase {
     self::assertSame(['side'], IcmsCatalogBuilder::sourceRegionsFromEditorial(['sourceRegions' => 'side']));
   }
 
+  /**
+   * A project's node type entry names the fields its page template shows;
+   * the migrator keeps their content in the field instead of repeating it.
+   *
+   * @covers ::pageFieldsFromEditorial
+   */
+  public function testPageFieldsAreNormalisedAndOptional(): void {
+    self::assertSame(
+      ['body', 'field_icms_image'],
+      IcmsCatalogBuilder::pageFieldsFromEditorial(['pageFields' => ['body', ' body ', '', 'field_icms_image']]),
+    );
+    self::assertSame([], IcmsCatalogBuilder::pageFieldsFromEditorial(['summary' => 'Paragraphs only.']));
+    self::assertSame(['body'], IcmsCatalogBuilder::pageFieldsFromEditorial(['pageFields' => 'body']));
+  }
+
 }

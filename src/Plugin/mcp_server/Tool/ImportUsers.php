@@ -18,11 +18,11 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 #[Tool(
   id: 'import_users',
   label: new TranslatableMarkup('Import users'),
-  description: new TranslatableMarkup('Upsert the source site\'s accounts so imported nodes can be owned by a person (idempotent by e-mail). New accounts are created BLOCKED and without a password — this imports authorship, not access — and no notification mail is ever sent. An account that already exists is matched, never renamed or unblocked; only mapped roles are added. Users import BEFORE nodes. Returns per-user {targetUid, action} plus `pending_target_setup` for source roles with no target.'),
+  description: new TranslatableMarkup('Upsert the source site\'s accounts so imported nodes can be owned by a person (idempotent by e-mail). A new account is created without a password and with the source\'s status: active when the source account is active (a blocked account, and with it the author of its pages, is hidden from visitors), blocked otherwise. No notification mail is ever sent. An account that already exists is matched and never renamed; its status is left alone unless an earlier import made it (no password, never logged in). `first_name` / `last_name` and `picture` fill the account\'s empty name fields and `user_picture`. Users import BEFORE nodes. Returns per-user {targetUid, action} plus `pending_target_setup` for source roles with no target.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [
-      'users' => ['type' => 'array', 'description' => 'Source accounts: {uid, uuid?, name, mail, status?, roles?, created?}. A user without `mail` is reported as skipped, never guessed at.'],
+      'users' => ['type' => 'array', 'description' => 'Source accounts: {uid, uuid?, name, mail, status?, roles?, created?, first_name?, last_name?, picture?: {url, alt?}}. A user without `mail` is reported as skipped, never guessed at.'],
       'role_mapping' => ['type' => 'object', 'description' => 'Source role id → target role id, as confirmed at the migration\'s role gate. An unmapped source role, or one mapped to a role this site lacks, is reported in `pending_target_setup`.'],
     ],
     'required' => ['users'],
