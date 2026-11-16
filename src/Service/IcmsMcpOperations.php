@@ -1775,6 +1775,9 @@ final class IcmsMcpOperations {
 
     $results = [];
     $uuid_to_plugin = [];
+    // Links of the target this call has written or taken over, so two source
+    // links never settle on the same target link.
+    $claimed = [];
     foreach ($ordered as $spec) {
       if (!is_array($spec) || trim((string) ($spec['title'] ?? '')) === '') {
         continue;
@@ -1880,6 +1883,39 @@ final class IcmsMcpOperations {
         }
       }
 
+      // A link the target already has under another uuid (built by hand, or
+      // by the project's setup) is the same menu item, not a second one: it
+      // is taken over as it stands, and only its target is put right.
+      $adopted = FALSE;
+      if ($existing === NULL) {
+        $existing = $this->findEquivalentMenuLink($link_storage, $menu, $parent_plugin, $title, $is_placeholder ? '' : $resolved_uri, $claimed);
+        $adopted = $existing !== NULL;
+      }
+      if ($adopted) {
+        $current_uri = (string) ($existing->link->uri ?? '');
+        $relinked = !$is_placeholder
+          && $this->menuLinkTargetKey($current_uri) !== $this->menuLinkTargetKey($resolved_uri);
+        if ($relinked) {
+          $existing->set('link', ['uri' => $resolved_uri]);
+          $existing->save();
+        }
+        $claimed[(int) $existing->id()] = TRUE;
+        if ($uuid !== '') {
+          // Children name their parent by the SOURCE uuid.
+          $uuid_to_plugin[$uuid] = 'menu_link_content:' . $existing->uuid();
+        }
+        $results[] = [
+          'title' => $title,
+          'status' => 'ok',
+          'action' => $relinked ? 'relinked' : 'matched',
+          'uri' => $relinked ? $resolved_uri : $current_uri,
+          'parent' => $parent_plugin,
+        ]
+          + ($relinked ? ['previous_uri' => $current_uri] : [])
+          + ($parent_reason !== '' ? ['warning' => $parent_reason] : []);
+        continue;
+      }
+
       $was_placeholder = $existing !== NULL
         && (string) ($existing->link->uri ?? '') === self::PLACEHOLDER_LINK_URI;
 
@@ -1940,6 +1976,7 @@ final class IcmsMcpOperations {
         }
       }
       $link->save();
+      $claimed[(int) $link->id()] = TRUE;
       $uuid_to_plugin[$link->uuid()] = 'menu_link_content:' . $link->uuid();
       $results[] = [
         'title' => $title,
@@ -1959,8 +1996,118 @@ final class IcmsMcpOperations {
       'unresolved_count' => count(array_filter($results, static fn (array $row) => ($row['status'] ?? '') === 'unresolved')),
       'placeholder_count' => count(array_filter($results, static fn (array $row) => ($row['status'] ?? '') === 'placeholder')),
       'orphaned_count' => count(array_filter($results, static fn (array $row) => isset($row['warning']))),
+      'matched_count' => count(array_filter($results, static fn (array $row) => in_array($row['action'] ?? '', ['matched', 'relinked'], TRUE))),
+      'relinked_count' => count(array_filter($results, static fn (array $row) => ($row['action'] ?? '') === 'relinked')),
       'links' => $results,
     ];
+  }
+
+  /**
+   * The link of this menu that already is the item a source link describes.
+   *
+   * Looked for among the links under the same parent only, so "Contact" in
+   * the footer column is never taken for "Contact" in the main navigation's
+   * sub-menu. Links this call has already written or taken over are left out.
+   */
+  protected function findEquivalentMenuLink($link_storage, string $menu, string $parent_plugin, string $title, string $uri, array $claimed): ?\Drupal\menu_link_content\MenuLinkContentInterface {
+    $query = $link_storage->getQuery()->accessCheck(FALSE)->condition('menu_name', $menu);
+    if ($parent_plugin === '') {
+      $root = $query->orConditionGroup()->notExists('parent')->condition('parent', '');
+      $query->condition($root);
+    }
+    else {
+      $query->condition('parent', $parent_plugin);
+    }
+    $ids = array_diff(array_map('intval', $query->execute()), array_keys($claimed));
+    if (!$ids) {
+      return NULL;
+    }
+    $links = $link_storage->loadMultiple($ids);
+    $candidates = [];
+    foreach ($links as $id => $link) {
+      $titles = [];
+      foreach (array_keys($link->getTranslationLanguages()) as $langcode) {
+        $titles[] = (string) $link->getTranslation($langcode)->getTitle();
+      }
+      $candidates[$id] = [
+        'titles' => $titles,
+        'target' => $this->menuLinkTargetKey((string) ($link->link->uri ?? '')),
+      ];
+    }
+    $match = self::pickEquivalentMenuLink($candidates, $title, $uri === '' ? '' : $this->menuLinkTargetKey($uri));
+    return $match === NULL ? NULL : $links[$match];
+  }
+
+  /**
+   * Which candidate is the same menu item: same target first, then same title.
+   *
+   * A link to the same page is the same item whatever it is called; a link
+   * with the same title under the same parent is the same item pointing
+   * somewhere else (the caller then corrects its target). A link to nothing
+   * (`<nolink>`, a placeholder) never matches by target. With several
+   * candidates the first by id wins.
+   *
+   * @param array<int, array{titles: string[], target: string}> $candidates
+   */
+  public static function pickEquivalentMenuLink(array $candidates, string $title, string $target): ?int {
+    ksort($candidates);
+    if ($target !== '' && !str_starts_with($target, 'route:')) {
+      foreach ($candidates as $id => $candidate) {
+        if ($candidate['target'] === $target) {
+          return (int) $id;
+        }
+      }
+    }
+    $wanted = mb_strtolower(trim($title));
+    if ($wanted === '') {
+      return NULL;
+    }
+    foreach ($candidates as $id => $candidate) {
+      foreach ($candidate['titles'] as $candidate_title) {
+        if (mb_strtolower(trim((string) $candidate_title)) === $wanted) {
+          return (int) $id;
+        }
+      }
+    }
+    return NULL;
+  }
+
+  /**
+   * A link uri in the one spelling two links to the same place share.
+   *
+   * `entity:node/5`, `internal:/node/5` and `internal:/about-us` (when that
+   * is the alias of node 5) are the same target.
+   */
+  protected function menuLinkTargetKey(string $uri): string {
+    return self::normalizeMenuLinkTarget(
+      $uri,
+      static fn (string $path): string => \Drupal::service('path_alias.manager')->getPathByAlias($path),
+    );
+  }
+
+  /**
+   * @param callable(string): string $alias_to_path
+   *   Resolves an alias to its system path (returns the input when none).
+   */
+  public static function normalizeMenuLinkTarget(string $uri, callable $alias_to_path): string {
+    $uri = trim($uri);
+    if (preg_match('#^entity:([a-z_]+)/(\d+)$#', $uri, $m)) {
+      return '/' . ($m[1] === 'taxonomy_term' ? 'taxonomy/term' : $m[1]) . '/' . $m[2];
+    }
+    if (str_starts_with($uri, 'internal:')) {
+      $path = substr($uri, strlen('internal:'));
+      $suffix = '';
+      if (preg_match('/[?#]/', $path, $m, PREG_OFFSET_CAPTURE)) {
+        $suffix = substr($path, $m[0][1]);
+        $path = substr($path, 0, $m[0][1]);
+      }
+      $path = '/' . trim($path, '/');
+      return ($path === '/' ? '/' : $alias_to_path($path)) . $suffix;
+    }
+    if (preg_match('#^https?://#i', $uri)) {
+      return rtrim($uri, '/');
+    }
+    return $uri;
   }
 
   /**
