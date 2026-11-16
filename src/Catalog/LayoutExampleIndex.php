@@ -162,6 +162,10 @@ final class LayoutExampleIndex {
           'title' => self::firstText($view),
           'children' => $this->children($view, $langcode, $definitionCache),
         ];
+        $references = self::nodeReferences($view, $langcode, $anonymous);
+        if ($references !== []) {
+          $examples[array_key_last($examples)]['references'] = $references;
+        }
       }
     }
     return [
@@ -285,6 +289,46 @@ final class LayoutExampleIndex {
   }
 
   /**
+   * The pages a layout lists by reference: `{field: [nid, …]}`, first twelve.
+   *
+   * A teaser section holds no content, only the pages it points to. A
+   * migration that previews such a section before those pages exist needs
+   * pages to show in their place, and the showcase's own are the ones made
+   * for that. Only pages an anonymous visitor can open are named.
+   */
+  private static function nodeReferences(FieldableEntityInterface $paragraph, string $langcode, AnonymousUserSession $anonymous): array {
+    $references = [];
+    foreach ($paragraph->getFieldDefinitions() as $name => $definition) {
+      if ($definition->getType() !== 'entity_reference' || (string) ($definition->getSetting('target_type') ?? '') !== 'node') {
+        continue;
+      }
+      if ($definition->getFieldStorageDefinition()->isBaseField()) {
+        continue;
+      }
+      $nids = [];
+      foreach ($paragraph->get($name) as $item) {
+        $node = $item->entity ?? NULL;
+        if (!$node instanceof NodeInterface) {
+          continue;
+        }
+        $view = $node->hasTranslation($langcode) ? $node->getTranslation($langcode) : $node;
+        if (!$view->isPublished() || !$view->access('view', $anonymous)) {
+          continue;
+        }
+        $nids[] = (int) $node->id();
+        if (count($nids) >= 12) {
+          break;
+        }
+      }
+      if ($nids !== []) {
+        $references[(string) $name] = array_values(array_unique($nids));
+      }
+    }
+    ksort($references);
+    return $references;
+  }
+
+  /**
    * The options a paragraph is stored with, as blökkli saved them.
    */
   private static function storedOptions(FieldableEntityInterface $paragraph): array {
@@ -384,6 +428,11 @@ final class LayoutExampleIndex {
         $options,
         $example['children'] ?? [],
       ];
+      // Only where there are any: an index without references hashes as it
+      // did before they were listed.
+      if (!empty($example['references'])) {
+        $rows[array_key_last($rows)][] = $example['references'];
+      }
     }
     return hash('sha256', json_encode($rows, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
   }

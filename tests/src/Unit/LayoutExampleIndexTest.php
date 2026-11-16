@@ -84,4 +84,21 @@ final class LayoutExampleIndexTest extends UnitTestCase {
     self::assertNotSame($hash, LayoutExampleIndex::indexHash([$grown]));
   }
 
+  /**
+   * Listing the pages an example points to must not stale every old capture.
+   *
+   * @covers ::indexHash
+   */
+  public function testHashFollowsReferencesOnlyWhereThereAreAny(): void {
+    $example = [
+      'id' => 'a', 'bundle' => 'example_layout_teasers', 'pagePath' => '/showcase/teasers',
+      'ordinal' => 2, 'siblingCount' => 5, 'options' => ['teaserVariant' => 'teaser'],
+    ];
+    $hash = LayoutExampleIndex::indexHash([$example]);
+    self::assertSame($hash, LayoutExampleIndex::indexHash([$example + ['references' => []]]));
+    $referenced = LayoutExampleIndex::indexHash([$example + ['references' => ['field_pages' => [4, 7]]]]);
+    self::assertNotSame($hash, $referenced);
+    self::assertNotSame($referenced, LayoutExampleIndex::indexHash([$example + ['references' => ['field_pages' => [4, 8]]]]));
+  }
+
 }
