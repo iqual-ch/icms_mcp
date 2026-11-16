@@ -137,6 +137,12 @@ A row behind which one of these files sits stays an ordinary section. With
 option step); without them the picture is left out. Any other background
 picture is treated as before. The list is passed on as the catalog's
 `sourceBackgrounds`, file names lower-cased.
+### Media: what each bundle's file field accepts
+
+Every media bundle with a file source lists `fileExtensions` in the catalog.
+An SVG goes to the `icon` bundle where a field allows it; otherwise to the
+`image` bundle, but only on a site whose image bundle accepts `svg`. Without
+either, the import reports that no allowed bundle can hold the file.
 
 ### Examples: where each combination can be seen
 

@@ -3375,7 +3375,7 @@ final class IcmsMcpOperations {
     }
     $extension = $this->mediaExtensionFromPath((string) parse_url($url, PHP_URL_PATH));
     if ($extension === 'svg') {
-      return in_array('icon', $allowed, TRUE) ? 'icon' : NULL;
+      return self::svgMediaBundle($allowed, $this->mediaBundleExtensions('image'));
     }
     foreach (self::NON_IMAGE_EXTENSIONS as $family => $extensions) {
       if (!in_array($extension, $extensions, TRUE)) {
@@ -3392,6 +3392,42 @@ final class IcmsMcpOperations {
       return 'image';
     }
     return $allowed[0] ?? NULL;
+  }
+
+  /**
+   * The media bundle an SVG goes to, or NULL when no allowed bundle takes it.
+   *
+   * `icon` first: that is what it is for. Otherwise `image`, but only on a
+   * site whose image bundle accepts the extension (a project that added
+   * `svg` to it): elsewhere the file would fail the field's validation and
+   * take the page down with it.
+   *
+   * @param string[] $allowed
+   *   Bundles the field allows.
+   * @param string[] $imageExtensions
+   *   Extensions the `image` bundle's source field accepts.
+   */
+  public static function svgMediaBundle(array $allowed, array $imageExtensions): ?string {
+    if (in_array('icon', $allowed, TRUE)) {
+      return 'icon';
+    }
+    if (in_array('image', $allowed, TRUE) && in_array('svg', $imageExtensions, TRUE)) {
+      return 'image';
+    }
+    return NULL;
+  }
+
+  /**
+   * File extensions a media bundle's source field accepts, lower-cased.
+   *
+   * @return string[]
+   */
+  protected function mediaBundleExtensions(string $bundle): array {
+    /** @var \Drupal\media\MediaTypeInterface|null $media_type */
+    $media_type = $this->entityTypeManager->getStorage('media_type')->load($bundle);
+    $definition = $media_type?->getSource()->getSourceFieldDefinition($media_type);
+    $extensions = (string) ($definition?->getSetting('file_extensions') ?? '');
+    return array_values(array_filter(preg_split('/[\s,]+/', strtolower($extensions)) ?: []));
   }
 
   /**
