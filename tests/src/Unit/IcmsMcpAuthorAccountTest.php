@@ -34,4 +34,14 @@ final class IcmsMcpAuthorAccountTest extends UnitTestCase {
     self::assertNull(IcmsMcpOperations::nameFieldFor(['name', 'field_nickname'], 'first'));
   }
 
+  /**
+   * @covers ::accountMatchedBy
+   */
+  public function testAnAccountFoundUnderAnotherEmailWasFoundByItsUsername(): void {
+    self::assertSame('mail', IcmsMcpOperations::accountMatchedBy(' Jane@Example.org ', 'jane@example.org'));
+    self::assertSame('name', IcmsMcpOperations::accountMatchedBy('jane@old.example', 'jane@example.org'));
+    self::assertSame('name', IcmsMcpOperations::accountMatchedBy('', 'jane@example.org'));
+    self::assertSame('name', IcmsMcpOperations::accountMatchedBy('', ''));
+  }
+
 }
