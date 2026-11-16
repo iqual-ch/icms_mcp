@@ -114,6 +114,13 @@ options:
 `optionDefinitions[<option>]`, the bundle entry over the option-wide one, and
 only for values that bundle offers.
 
+### Media: what each bundle's file field accepts
+
+Every media bundle with a file source lists `fileExtensions` in the catalog.
+An SVG goes to the `icon` bundle where a field allows it; otherwise to the
+`image` bundle, but only on a site whose image bundle accepts `svg`. Without
+either, the import reports that no allowed bundle can hold the file.
+
 ### Examples: where each combination can be seen
 
 A project that builds a showcase (one page per component, one section per

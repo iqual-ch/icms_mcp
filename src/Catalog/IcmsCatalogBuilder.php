@@ -239,6 +239,14 @@ final class IcmsCatalogBuilder {
           'capabilities' => $this->capabilities($fields, $editorial),
           'contentTranslationEnabled' => $this->contentTranslationEnabled($entityType, $bundle),
         ];
+        if ($entityType === 'media') {
+          // What the bundle's file field accepts: whether an SVG can be a
+          // picture here is a site setting, not a rule.
+          $extensions = $this->mediaFileExtensions($bundle);
+          if ($extensions !== []) {
+            $entry['fileExtensions'] = $extensions;
+          }
+        }
         if ($entityType === 'paragraph') {
           $entry['role'] = (string) ($editorial['role'] ?? 'component');
           // The bundle's real options come from the frontend-generated blökkli
@@ -611,6 +619,31 @@ final class IcmsCatalogBuilder {
       }
     }
     return $regions;
+  }
+
+  /**
+   * File extensions a media bundle's source field accepts, sorted.
+   *
+   * @return string[]
+   */
+  private function mediaFileExtensions(string $bundle): array {
+    /** @var \Drupal\media\MediaTypeInterface|null $mediaType */
+    $mediaType = $this->entityTypeManager->getStorage('media_type')->load($bundle);
+    $definition = $mediaType?->getSource()->getSourceFieldDefinition($mediaType);
+    return self::fileExtensionsFromSetting($definition?->getSetting('file_extensions'));
+  }
+
+  /**
+   * A field's `file_extensions` setting ("png gif jpg") as a sorted list.
+   *
+   * @return string[]
+   */
+  public static function fileExtensionsFromSetting(mixed $setting): array {
+    $extensions = array_values(array_unique(array_filter(
+      preg_split('/[\s,]+/', strtolower(is_string($setting) ? $setting : '')) ?: [],
+    )));
+    sort($extensions);
+    return $extensions;
   }
 
   private function capabilities(array $fields, array $editorial): array {
