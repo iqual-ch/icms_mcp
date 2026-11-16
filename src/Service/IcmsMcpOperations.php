@@ -1314,21 +1314,75 @@ final class IcmsMcpOperations {
   }
 
   /**
+   * Which form of this site a source form is, and what the import does.
+   *
+   * A form is the same form when it has the source's uuid, whatever its id:
+   * an earlier import made it. A form that only shares the id is another
+   * form (a demo "contact" where the source has its own "contact"): a clash,
+   * decided by `$on_clash`. `new_id` creates the source form under a free id,
+   * `replace` puts it in the other form's place, anything else keeps the
+   * site's form. Without a source uuid the id is all there is to go by.
+   *
+   * @param string $id
+   *   The source form's id.
+   * @param string $source_uuid
+   *   The source form's uuid, '' when the export does not carry it.
+   * @param string|null $id_holder_uuid
+   *   The uuid of this site's form with that id, NULL when there is none.
+   * @param string|null $uuid_holder_id
+   *   The id of this site's form with the source uuid, NULL when none.
+   * @param string $on_clash
+   *   `new_id`, `replace` or `keep`.
+   * @param callable $id_taken
+   *   `fn(string $id): bool`, whether a form has this id.
+   *
+   * @return array{0: string, 1: string, 2: bool}
+   *   `[matched|created|replaced, target id, clash]`.
+   */
+  public static function resolveWebformTarget(string $id, string $source_uuid, ?string $id_holder_uuid, ?string $uuid_holder_id, string $on_clash, callable $id_taken): array {
+    if ($uuid_holder_id !== NULL) {
+      return ['matched', $uuid_holder_id, FALSE];
+    }
+    if ($id_holder_uuid === NULL) {
+      return ['created', $id, FALSE];
+    }
+    if ($source_uuid === '' || $source_uuid === $id_holder_uuid) {
+      return ['matched', $id, FALSE];
+    }
+    if ($on_clash === 'replace') {
+      return ['replaced', $id, TRUE];
+    }
+    if ($on_clash === 'new_id') {
+      for ($n = 2; $n < 100; $n++) {
+        $suffix = '_' . $n;
+        $candidate = substr($id, 0, 32 - strlen($suffix)) . $suffix;
+        if (!$id_taken($candidate)) {
+          return ['created', $candidate, TRUE];
+        }
+      }
+    }
+    return ['matched', $id, TRUE];
+  }
+
+  /**
    * Import the source's webforms: config as exported, submissions idempotently.
    *
    * A form the target does not have is created from the exported config array
    * (handlers and recipients included, third-party settings of modules this
    * site lacks dropped — see withoutForeignThirdPartySettings()) plus its config translations for
-   * the languages this site has enabled. A form the target already has under
-   * the same id is the customer's: it is matched and its config left alone —
-   * only submissions are added. Submissions are idempotent by uuid, so a
+   * the languages this site has enabled. A form the target already has (the
+   * source's uuid, under any id) is matched and its config left alone — only
+   * submissions are added. A different form under the same id is a clash,
+   * reported on the row and settled by the form's `on_clash` (see
+   * resolveWebformTarget()); the row's `target_id` names the form the source
+   * form became when that is not its own id. Submissions are idempotent by uuid, so a
    * retried slice costs nothing, and their submitter is re-linked by e-mail
    * (anonymous when the address is empty or unknown here); the source entity a
    * submission was made on is dropped — a source nid means nothing here.
    *
    * @param array $webforms
    *   `[{id, uuid?, label, status?, langcode?, config, configTranslations?,
-   *   submissions?: [{uuid, created, completed, changed, in_draft, langcode,
+   *   on_clash?: new_id|replace|keep, submissions?: [{uuid, created, completed, changed, in_draft, langcode,
    *   remote_addr, uid, mail, sticky, locked, notes, data}]}]`.
    * @param bool $include_submissions
    *   Whether the `submissions` lists are to be written at all.
@@ -1357,16 +1411,34 @@ final class IcmsMcpOperations {
         continue;
       }
       $row = ['id' => $webform_id, 'submissionsCreated' => 0, 'submissionsSkipped' => 0];
-      $webform = $webform_storage->load($webform_id);
-      if ($webform === NULL) {
-        $config = is_array($spec['config'] ?? NULL) ? $spec['config'] : [];
+      $config = is_array($spec['config'] ?? NULL) ? $spec['config'] : [];
+      $source_uuid = trim((string) ($spec['uuid'] ?? $config['uuid'] ?? ''));
+      $id_holder = $webform_storage->load($webform_id);
+      $uuid_holders = $source_uuid !== '' ? $webform_storage->loadByProperties(['uuid' => $source_uuid]) : [];
+      $uuid_holder = $uuid_holders ? reset($uuid_holders) : NULL;
+      [$mode, $target_id, $clash] = static::resolveWebformTarget(
+        $webform_id,
+        $source_uuid,
+        $id_holder ? (string) $id_holder->uuid() : NULL,
+        $uuid_holder ? (string) $uuid_holder->id() : NULL,
+        (string) ($spec['on_clash'] ?? ''),
+        static fn (string $candidate): bool => $webform_storage->load($candidate) !== NULL,
+      );
+      if ($clash) {
+        $row['clash'] = TRUE;
+      }
+      if ($target_id !== $webform_id) {
+        $row['target_id'] = $target_id;
+      }
+      if ($mode === 'matched') {
+        $webform = $uuid_holder ?? $id_holder;
+        $row['action'] = 'matched';
+      }
+      else {
         unset($config['_core']);
-        $config['id'] = $webform_id;
+        $config['id'] = $target_id;
         if (!isset($config['title']) || trim((string) $config['title']) === '') {
           $config['title'] = (string) ($spec['label'] ?? $webform_id);
-        }
-        if (isset($config['uuid']) && $this->uuidTaken('webform', (string) $config['uuid'])) {
-          unset($config['uuid']);
         }
         [$config, $dropped_modules] = static::withoutForeignThirdPartySettings($config, $this->isModuleInstalled(...));
         if ($dropped_modules) {
@@ -1374,6 +1446,20 @@ final class IcmsMcpOperations {
           $this->logger->notice('icms_mcp: webform @id imported without the settings of modules this site does not have: @modules', ['@id' => $webform_id, '@modules' => implode(', ', $dropped_modules)]);
         }
         try {
+          if ($mode === 'replaced' && $id_holder !== NULL) {
+            // The reviewer chose the source form over the one this site had
+            // under the id. Its submissions go with it.
+            $this->logger->notice('icms_mcp: webform @id replaced by the source form of the same id.', ['@id' => $webform_id]);
+            $id_holder->delete();
+          }
+          // The source uuid is how a later import finds this form again,
+          // whatever id it ended up under.
+          if ($source_uuid !== '') {
+            $config['uuid'] = $source_uuid;
+          }
+          if (isset($config['uuid']) && $this->uuidTaken('webform', (string) $config['uuid'])) {
+            unset($config['uuid']);
+          }
           $webform = $webform_storage->create($config);
           $webform->save();
         }
@@ -1383,11 +1469,8 @@ final class IcmsMcpOperations {
           continue;
         }
         $created++;
-        $row['action'] = 'created';
-        $this->writeWebformTranslations($webform_id, is_array($spec['configTranslations'] ?? NULL) ? $spec['configTranslations'] : [], $enabled_languages);
-      }
-      else {
-        $row['action'] = 'matched';
+        $row['action'] = $mode;
+        $this->writeWebformTranslations($target_id, is_array($spec['configTranslations'] ?? NULL) ? $spec['configTranslations'] : [], $enabled_languages);
       }
 
       if ($include_submissions && $submission_storage !== NULL) {
@@ -1401,7 +1484,7 @@ final class IcmsMcpOperations {
             continue;
           }
           $values = [
-            'webform_id' => $webform_id,
+            'webform_id' => $target_id,
             'data' => is_array($submission_spec['data'] ?? NULL) ? $submission_spec['data'] : [],
             'uid' => $this->resolveOwnerUid(['mail' => (string) ($submission_spec['mail'] ?? '')]) ?? 0,
             'in_draft' => (int) (bool) ($submission_spec['in_draft'] ?? FALSE),
@@ -1428,7 +1511,7 @@ final class IcmsMcpOperations {
             $row['submissionsCreated']++;
           }
           catch (\Throwable $e) {
-            $this->logger->warning('icms_mcp: submission @uuid on @id skipped: @msg', ['@uuid' => $uuid, '@id' => $webform_id, '@msg' => $e->getMessage()]);
+            $this->logger->warning('icms_mcp: submission @uuid on @id skipped: @msg', ['@uuid' => $uuid, '@id' => $target_id, '@msg' => $e->getMessage()]);
             $row['submissionsSkipped']++;
             $row['submissionErrors'] = ($row['submissionErrors'] ?? 0) + 1;
           }
@@ -1445,6 +1528,7 @@ final class IcmsMcpOperations {
       'webform_count' => count($results),
       'created_count' => $created,
       'matched_count' => count($results) - $created - $errors,
+      'clash_count' => count(array_filter($results, static fn (array $row): bool => !empty($row['clash']))),
       'error_count' => $errors,
       'submissions_created' => $submissions_created,
       'submissions_skipped' => $submissions_skipped,
