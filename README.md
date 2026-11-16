@@ -119,6 +119,25 @@ options:
 `optionDefinitions[<option>]`, the bundle entry over the option-wide one, and
 only for values that bundle offers.
 
+### Source backgrounds: decoration the target draws itself
+
+A source row can paint a picture behind its text. The content migrator reads
+that as text on a picture (a hero), which is wrong when the picture is only
+decoration. The project lists such files by name:
+
+```yaml
+# icms_mcp.catalog_options
+sourceBackgrounds:
+  - { file: 'Circles Blue.png', option: bgCircles, value: true }
+  - { file: 'World map.png' }
+```
+
+A row behind which one of these files sits stays an ordinary section. With
+`option` / `value` it gets that option (shown as the preset at the migrator's
+option step); without them the picture is left out. Any other background
+picture is treated as before. The list is passed on as the catalog's
+`sourceBackgrounds`, file names lower-cased.
+
 ### Examples: where each combination can be seen
 
 A project that builds a showcase (one page per component, one section per
