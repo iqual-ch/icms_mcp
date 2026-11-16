@@ -15,7 +15,7 @@ Tools (`src/Plugin/mcp_server/Tool/`), advertised under their tool id:
 | `validate_pivot`         | Drupal-side validation of an `icms-drupal-import-handoff-v1` pivot.                       |
 | `import_pivot`           | Transactional create/update of node + paragraphs + translations. Honours `strategy` and HITL gate. |
 | `import_taxonomy_terms`  | Upsert one vocabulary's terms (uuid/name identity, hierarchy, translations). Step 3, before nodes. |
-| `import_menu_links`      | Upsert one menu's links, parents before children; node links resolve via the source-key field, and a parent whose page is missing is kept disabled so its children keep their place. Step 3, after nodes. |
+| `import_menu_links`      | Upsert one menu's links, parents before children; node links resolve via the source-key field, and a parent whose page is missing is kept disabled so its children keep their place. A link the target already has under the same parent (same page, or same title) is taken over instead of doubled: its target is corrected when wrong, nothing else is changed (`action: matched` / `relinked`). Step 3, after nodes. |
 | `lookup_existing_node`   | The node an import of a source page would land on: by canonical source URL (the source-key field), and with `path_alias` / `is_front_page` also a page built by hand at the same path (`matched_by: alias \| front_page \| adopted`). |
 | `get_icms_layout_examples` | Read-only: the site's reference examples of each layout bundle and option combination, from the showcase page declared in `icms_mcp.catalog_examples` and its menu children. `{indexHash, pages, examples: [{id, paragraphId, bundle, options, storedOptions, pagePath, ordinal, siblingCount, title, children}], skipped}`. |
 | `rewrite_node_links`     | Post-import pass: `{from, to}` replacements applied to `href`s in text fields and link-field uris (exact, or by resolved `#fragment`) on the node, its translations and its paragraphs. Anchors → `#<paragraph id>`, document links → the stored file's URL. |
@@ -87,6 +87,25 @@ content). The catalog passes it on as `nodeTypes.<bundle>.pageFields`; the
 migrator then leaves that content in the field instead of repeating it as a
 paragraph. Without it a page is assumed to show its paragraphs only.
 
+### Section fields that come from the page
+
+A component that lists what belongs to its page (the products of the page's
+own industry) needs the page's term on the section. A source site has no
+such value to migrate. The project declares the pairing on the bundle:
+
+```yaml
+# icms_mcp.catalog_descriptions
+descriptions:
+  paragraph:
+    example_layout_related:
+      fieldsFromPage:
+        field_example_topic: field_page_topic   # section field: page field
+```
+
+When a page is imported, each top-level section of that bundle gets the
+page's value in that field, if the field is empty, the page has a value and
+both fields hold the same kind of value. A value the import sent is kept.
+
 ### Options: what each value does
 
 On a site with a blökkli schema file (`paragraphs_blokkli.settings: schema_file`)
@@ -118,6 +137,32 @@ options:
 `description` and `effects` are merged into each bundle's
 `optionDefinitions[<option>]`, the bundle entry over the option-wide one, and
 only for values that bundle offers.
+
+### Source backgrounds: decoration the target draws itself
+
+A source row can paint a picture behind its text. The content migrator reads
+that as text on a picture (a hero), which is wrong when the picture is only
+decoration. The project lists such files by name:
+
+```yaml
+# icms_mcp.catalog_options
+sourceBackgrounds:
+  - { file: 'Circles Blue.png', option: bgCircles, value: true }
+  - { file: 'World map.png' }
+```
+
+A row behind which one of these files sits stays an ordinary section. With
+`option` / `value` it gets that option (shown as the preset at the migrator's
+option step); without them the picture is left out. Any other background
+picture is treated as before. The list is passed on as the catalog's
+`sourceBackgrounds`, file names lower-cased.
+
+### Media: what each bundle's file field accepts
+
+Every media bundle with a file source lists `fileExtensions` in the catalog.
+An SVG goes to the `icon` bundle where a field allows it; otherwise to the
+`image` bundle, but only on a site whose image bundle accepts `svg`. Without
+either, the import reports that no allowed bundle can hold the file.
 
 ### Examples: where each combination can be seen
 

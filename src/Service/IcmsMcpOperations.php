@@ -981,6 +981,7 @@ final class IcmsMcpOperations {
           0,
           $paragraph_langcode,
         );
+        $this->copyFieldsFromPage($entity, $node);
         $created_paragraphs[] = [
           'target_id' => $entity->id(),
           'target_revision_id' => $entity->getRevisionId(),
@@ -1233,7 +1234,12 @@ final class IcmsMcpOperations {
       $source_uid = (int) ($spec['uid'] ?? 0);
       $source_active = !empty($spec['status']);
       $activated = FALSE;
-      if ($mail === '') {
+      // The account this person already has here: by e-mail, else by
+      // username. A username is unique on a site, and a second account for
+      // the same login ("name-2") is a duplicate nobody asked for.
+      $account = $this->findAccount($mail, $name);
+      $matched_by = $account === NULL ? '' : self::accountMatchedBy($mail, (string) $account->getEmail());
+      if ($account === NULL && $mail === '') {
         $results[] = [
           'uid' => $source_uid,
           'name' => $name,
@@ -1258,9 +1264,6 @@ final class IcmsMcpOperations {
         $target_roles[] = $mapped;
       }
 
-      $matches = $user_storage->loadByProperties(['mail' => $mail]);
-      $account = $matches ? reset($matches) : NULL;
-
       if ($account === NULL) {
         $values = [
           'name' => $this->availableUserName($name !== '' ? $name : $mail, $user_storage),
@@ -1278,8 +1281,9 @@ final class IcmsMcpOperations {
       }
       else {
         // An account that already exists on the target is the customer's, not
-        // the migration's: never rename it and never change whether it can log
-        // in. Only the roles this migration is responsible for are added.
+        // the migration's: never rename it, never change its e-mail and never
+        // change whether it can log in. Only the roles this migration is
+        // responsible for are added.
         $action = 'matched';
         // The one exception is an account an earlier import made: it has no
         // password and nobody ever logged in with it. It follows the source,
@@ -1306,7 +1310,8 @@ final class IcmsMcpOperations {
         'roles' => $target_roles,
         'action' => $action,
         'active' => $account->isActive(),
-      ] + ($activated ? ['activated' => TRUE] : []) + ($profile ? ['profile' => $profile] : []);
+      ] + ($matched_by !== '' ? ['matchedBy' => $matched_by] : [])
+        + ($activated ? ['activated' => TRUE] : []) + ($profile ? ['profile' => $profile] : []);
     }
 
     $created = 0;
@@ -1713,23 +1718,52 @@ final class IcmsMcpOperations {
   }
 
   /**
-   * The target uid for a `{email, name}` owner, or NULL to leave it alone.
+   * The target uid for a `{email, username, name}` owner, or NULL.
    *
-   * By e-mail only. A name is not an identity — two people share one, and
-   * matching on it would hand a customer's pages to the wrong account. When an
-   * owner cannot be resolved the node keeps the importing account, which is
-   * the honest outcome: authorship missing, not authorship wrong.
+   * By e-mail, else by username (`username`, or `name` when the caller sends
+   * no username): the account the person has on this site owns the content,
+   * whatever uid it had on the source. A username is unique on a site; a
+   * display name is not, which is why `username` is preferred when sent.
+   * When an owner cannot be resolved the node keeps the importing account:
+   * authorship missing, not authorship wrong.
    */
   protected function resolveOwnerUid(array $owner): ?int {
-    $mail = trim((string) ($owner['email'] ?? $owner['mail'] ?? ''));
-    if ($mail === '' || !$this->entityTypeManager->hasDefinition('user')) {
+    if (!$this->entityTypeManager->hasDefinition('user')) {
       return NULL;
     }
-    $matches = $this->entityTypeManager->getStorage('user')->loadByProperties(['mail' => $mail]);
-    if (!$matches) {
-      return NULL;
+    $account = $this->findAccount(
+      trim((string) ($owner['email'] ?? $owner['mail'] ?? '')),
+      trim((string) ($owner['username'] ?? $owner['name'] ?? '')),
+    );
+    return $account === NULL ? NULL : (int) $account->id();
+  }
+
+  /**
+   * The account with this e-mail, else the one with this username.
+   *
+   * The anonymous account (uid 0) is never an answer.
+   */
+  protected function findAccount(string $mail, string $name): ?\Drupal\user\UserInterface {
+    $storage = $this->entityTypeManager->getStorage('user');
+    foreach (['mail' => $mail, 'name' => $name] as $property => $value) {
+      if ($value === '') {
+        continue;
+      }
+      foreach ($storage->loadByProperties([$property => $value]) as $account) {
+        if ((int) $account->id() > 0) {
+          return $account;
+        }
+      }
     }
-    return (int) reset($matches)->id();
+    return NULL;
+  }
+
+  /**
+   * How a found account was recognised: `mail`, or `name` when the e-mails differ.
+   */
+  public static function accountMatchedBy(string $source_mail, string $account_mail): string {
+    $source_mail = mb_strtolower(trim($source_mail));
+    return $source_mail !== '' && $source_mail === mb_strtolower(trim($account_mail)) ? 'mail' : 'name';
   }
 
   /**
@@ -1774,6 +1808,9 @@ final class IcmsMcpOperations {
 
     $results = [];
     $uuid_to_plugin = [];
+    // Links of the target this call has written or taken over, so two source
+    // links never settle on the same target link.
+    $claimed = [];
     foreach ($ordered as $spec) {
       if (!is_array($spec) || trim((string) ($spec['title'] ?? '')) === '') {
         continue;
@@ -1879,6 +1916,39 @@ final class IcmsMcpOperations {
         }
       }
 
+      // A link the target already has under another uuid (built by hand, or
+      // by the project's setup) is the same menu item, not a second one: it
+      // is taken over as it stands, and only its target is put right.
+      $adopted = FALSE;
+      if ($existing === NULL) {
+        $existing = $this->findEquivalentMenuLink($link_storage, $menu, $parent_plugin, $title, $is_placeholder ? '' : $resolved_uri, $claimed);
+        $adopted = $existing !== NULL;
+      }
+      if ($adopted) {
+        $current_uri = (string) ($existing->link->uri ?? '');
+        $relinked = !$is_placeholder
+          && $this->menuLinkTargetKey($current_uri) !== $this->menuLinkTargetKey($resolved_uri);
+        if ($relinked) {
+          $existing->set('link', ['uri' => $resolved_uri]);
+          $existing->save();
+        }
+        $claimed[(int) $existing->id()] = TRUE;
+        if ($uuid !== '') {
+          // Children name their parent by the SOURCE uuid.
+          $uuid_to_plugin[$uuid] = 'menu_link_content:' . $existing->uuid();
+        }
+        $results[] = [
+          'title' => $title,
+          'status' => 'ok',
+          'action' => $relinked ? 'relinked' : 'matched',
+          'uri' => $relinked ? $resolved_uri : $current_uri,
+          'parent' => $parent_plugin,
+        ]
+          + ($relinked ? ['previous_uri' => $current_uri] : [])
+          + ($parent_reason !== '' ? ['warning' => $parent_reason] : []);
+        continue;
+      }
+
       $was_placeholder = $existing !== NULL
         && (string) ($existing->link->uri ?? '') === self::PLACEHOLDER_LINK_URI;
 
@@ -1939,6 +2009,7 @@ final class IcmsMcpOperations {
         }
       }
       $link->save();
+      $claimed[(int) $link->id()] = TRUE;
       $uuid_to_plugin[$link->uuid()] = 'menu_link_content:' . $link->uuid();
       $results[] = [
         'title' => $title,
@@ -1958,8 +2029,118 @@ final class IcmsMcpOperations {
       'unresolved_count' => count(array_filter($results, static fn (array $row) => ($row['status'] ?? '') === 'unresolved')),
       'placeholder_count' => count(array_filter($results, static fn (array $row) => ($row['status'] ?? '') === 'placeholder')),
       'orphaned_count' => count(array_filter($results, static fn (array $row) => isset($row['warning']))),
+      'matched_count' => count(array_filter($results, static fn (array $row) => in_array($row['action'] ?? '', ['matched', 'relinked'], TRUE))),
+      'relinked_count' => count(array_filter($results, static fn (array $row) => ($row['action'] ?? '') === 'relinked')),
       'links' => $results,
     ];
+  }
+
+  /**
+   * The link of this menu that already is the item a source link describes.
+   *
+   * Looked for among the links under the same parent only, so "Contact" in
+   * the footer column is never taken for "Contact" in the main navigation's
+   * sub-menu. Links this call has already written or taken over are left out.
+   */
+  protected function findEquivalentMenuLink($link_storage, string $menu, string $parent_plugin, string $title, string $uri, array $claimed): ?\Drupal\menu_link_content\MenuLinkContentInterface {
+    $query = $link_storage->getQuery()->accessCheck(FALSE)->condition('menu_name', $menu);
+    if ($parent_plugin === '') {
+      $root = $query->orConditionGroup()->notExists('parent')->condition('parent', '');
+      $query->condition($root);
+    }
+    else {
+      $query->condition('parent', $parent_plugin);
+    }
+    $ids = array_diff(array_map('intval', $query->execute()), array_keys($claimed));
+    if (!$ids) {
+      return NULL;
+    }
+    $links = $link_storage->loadMultiple($ids);
+    $candidates = [];
+    foreach ($links as $id => $link) {
+      $titles = [];
+      foreach (array_keys($link->getTranslationLanguages()) as $langcode) {
+        $titles[] = (string) $link->getTranslation($langcode)->getTitle();
+      }
+      $candidates[$id] = [
+        'titles' => $titles,
+        'target' => $this->menuLinkTargetKey((string) ($link->link->uri ?? '')),
+      ];
+    }
+    $match = self::pickEquivalentMenuLink($candidates, $title, $uri === '' ? '' : $this->menuLinkTargetKey($uri));
+    return $match === NULL ? NULL : $links[$match];
+  }
+
+  /**
+   * Which candidate is the same menu item: same target first, then same title.
+   *
+   * A link to the same page is the same item whatever it is called; a link
+   * with the same title under the same parent is the same item pointing
+   * somewhere else (the caller then corrects its target). A link to nothing
+   * (`<nolink>`, a placeholder) never matches by target. With several
+   * candidates the first by id wins.
+   *
+   * @param array<int, array{titles: string[], target: string}> $candidates
+   */
+  public static function pickEquivalentMenuLink(array $candidates, string $title, string $target): ?int {
+    ksort($candidates);
+    if ($target !== '' && !str_starts_with($target, 'route:')) {
+      foreach ($candidates as $id => $candidate) {
+        if ($candidate['target'] === $target) {
+          return (int) $id;
+        }
+      }
+    }
+    $wanted = mb_strtolower(trim($title));
+    if ($wanted === '') {
+      return NULL;
+    }
+    foreach ($candidates as $id => $candidate) {
+      foreach ($candidate['titles'] as $candidate_title) {
+        if (mb_strtolower(trim((string) $candidate_title)) === $wanted) {
+          return (int) $id;
+        }
+      }
+    }
+    return NULL;
+  }
+
+  /**
+   * A link uri in the one spelling two links to the same place share.
+   *
+   * `entity:node/5`, `internal:/node/5` and `internal:/about-us` (when that
+   * is the alias of node 5) are the same target.
+   */
+  protected function menuLinkTargetKey(string $uri): string {
+    return self::normalizeMenuLinkTarget(
+      $uri,
+      static fn (string $path): string => \Drupal::service('path_alias.manager')->getPathByAlias($path),
+    );
+  }
+
+  /**
+   * @param callable(string): string $alias_to_path
+   *   Resolves an alias to its system path (returns the input when none).
+   */
+  public static function normalizeMenuLinkTarget(string $uri, callable $alias_to_path): string {
+    $uri = trim($uri);
+    if (preg_match('#^entity:([a-z_]+)/(\d+)$#', $uri, $m)) {
+      return '/' . ($m[1] === 'taxonomy_term' ? 'taxonomy/term' : $m[1]) . '/' . $m[2];
+    }
+    if (str_starts_with($uri, 'internal:')) {
+      $path = substr($uri, strlen('internal:'));
+      $suffix = '';
+      if (preg_match('/[?#]/', $path, $m, PREG_OFFSET_CAPTURE)) {
+        $suffix = substr($path, $m[0][1]);
+        $path = substr($path, 0, $m[0][1]);
+      }
+      $path = '/' . trim($path, '/');
+      return ($path === '/' ? '/' : $alias_to_path($path)) . $suffix;
+    }
+    if (preg_match('#^https?://#i', $uri)) {
+      return rtrim($uri, '/');
+    }
+    return $uri;
   }
 
   /**
@@ -2573,6 +2754,77 @@ final class IcmsMcpOperations {
 
     $entity->save();
     return $entity;
+  }
+
+  /**
+   * Fill a section's empty fields the project says come from its page.
+   *
+   * A component that lists "what belongs to this page" (the products of the
+   * page's own industry) needs the page's term on the section. The source
+   * has no such value to migrate: there the list read it from the page.
+   * The project declares the pairing on the bundle's description entry:
+   *
+   * @code
+   * # icms_mcp.catalog_descriptions
+   * descriptions:
+   *   paragraph:
+   *     example_layout_related:
+   *       fieldsFromPage:
+   *         field_example_topic: field_page_topic
+   * @endcode
+   *
+   * Only an empty section field is filled, only from a page field that has a
+   * value, and only when both fields hold the same kind of value. A value
+   * the import sent is never replaced.
+   */
+  protected function copyFieldsFromPage(
+    \Drupal\paragraphs\ParagraphInterface $paragraph,
+    \Drupal\Core\Entity\FieldableEntityInterface $page,
+  ): void {
+    $declared = \Drupal::config('icms_mcp.catalog_descriptions')
+      ->get('descriptions.paragraph.' . $paragraph->bundle() . '.fieldsFromPage');
+    $copied = FALSE;
+    foreach (self::fieldsFromPageMap($declared) as $field => $page_field) {
+      if (!$paragraph->hasField($field) || !$page->hasField($page_field)) {
+        continue;
+      }
+      if (!$paragraph->get($field)->isEmpty() || $page->get($page_field)->isEmpty()) {
+        continue;
+      }
+      $target = $paragraph->getFieldDefinition($field);
+      $source = $page->getFieldDefinition($page_field);
+      if ($target->getType() !== $source->getType()
+        || $target->getSetting('target_type') !== $source->getSetting('target_type')) {
+        continue;
+      }
+      $values = $page->get($page_field)->getValue();
+      $cardinality = $target->getFieldStorageDefinition()->getCardinality();
+      if ($cardinality > 0) {
+        $values = array_slice($values, 0, $cardinality);
+      }
+      $paragraph->set($field, $values);
+      $copied = TRUE;
+    }
+    if ($copied) {
+      $paragraph->save();
+    }
+  }
+
+  /**
+   * The declared `fieldsFromPage` pairs: section field => page field.
+   *
+   * @return array<string, string>
+   */
+  public static function fieldsFromPageMap(mixed $declared): array {
+    $map = [];
+    foreach (is_array($declared) ? $declared : [] as $field => $page_field) {
+      $field = is_string($field) ? trim($field) : '';
+      $page_field = is_string($page_field) ? trim($page_field) : '';
+      if ($field !== '' && $page_field !== '') {
+        $map[$field] = $page_field;
+      }
+    }
+    return $map;
   }
 
   /**
@@ -3375,7 +3627,7 @@ final class IcmsMcpOperations {
     }
     $extension = $this->mediaExtensionFromPath((string) parse_url($url, PHP_URL_PATH));
     if ($extension === 'svg') {
-      return in_array('icon', $allowed, TRUE) ? 'icon' : NULL;
+      return self::svgMediaBundle($allowed, $this->mediaBundleExtensions('image'));
     }
     foreach (self::NON_IMAGE_EXTENSIONS as $family => $extensions) {
       if (!in_array($extension, $extensions, TRUE)) {
@@ -3392,6 +3644,42 @@ final class IcmsMcpOperations {
       return 'image';
     }
     return $allowed[0] ?? NULL;
+  }
+
+  /**
+   * The media bundle an SVG goes to, or NULL when no allowed bundle takes it.
+   *
+   * `icon` first: that is what it is for. Otherwise `image`, but only on a
+   * site whose image bundle accepts the extension (a project that added
+   * `svg` to it): elsewhere the file would fail the field's validation and
+   * take the page down with it.
+   *
+   * @param string[] $allowed
+   *   Bundles the field allows.
+   * @param string[] $imageExtensions
+   *   Extensions the `image` bundle's source field accepts.
+   */
+  public static function svgMediaBundle(array $allowed, array $imageExtensions): ?string {
+    if (in_array('icon', $allowed, TRUE)) {
+      return 'icon';
+    }
+    if (in_array('image', $allowed, TRUE) && in_array('svg', $imageExtensions, TRUE)) {
+      return 'image';
+    }
+    return NULL;
+  }
+
+  /**
+   * File extensions a media bundle's source field accepts, lower-cased.
+   *
+   * @return string[]
+   */
+  protected function mediaBundleExtensions(string $bundle): array {
+    /** @var \Drupal\media\MediaTypeInterface|null $media_type */
+    $media_type = $this->entityTypeManager->getStorage('media_type')->load($bundle);
+    $definition = $media_type?->getSource()->getSourceFieldDefinition($media_type);
+    $extensions = (string) ($definition?->getSetting('file_extensions') ?? '');
+    return array_values(array_filter(preg_split('/[\s,]+/', strtolower($extensions)) ?: []));
   }
 
   /**

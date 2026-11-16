@@ -13,6 +13,21 @@ icms_mcp.catalog_options:
     options:
       type: ignore
       label: 'Option definition overrides keyed by option name'
+    sourceBackgrounds:
+      type: sequence
+      label: 'Source background pictures that are decoration'
+      sequence:
+        type: mapping
+        mapping:
+          file:
+            type: string
+            label: 'File name of the background picture'
+          option:
+            type: string
+            label: 'Option the target draws the decoration with (empty = leave the picture out)'
+          value:
+            type: ignore
+            label: 'Value of that option'
 
 icms_mcp.catalog_examples:
   type: config_object

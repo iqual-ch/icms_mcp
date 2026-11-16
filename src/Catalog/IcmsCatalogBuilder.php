@@ -242,6 +242,14 @@ final class IcmsCatalogBuilder {
         if ($entityType === 'node') {
           $entry['pageFields'] = self::pageFieldsFromEditorial($editorial);
         }
+        if ($entityType === 'media') {
+          // What the bundle's file field accepts: whether an SVG can be a
+          // picture here is a site setting, not a rule.
+          $extensions = $this->mediaFileExtensions($bundle);
+          if ($extensions !== []) {
+            $entry['fileExtensions'] = $extensions;
+          }
+        }
         if ($entityType === 'paragraph') {
           $entry['role'] = (string) ($editorial['role'] ?? 'component');
           // The bundle's real options come from the frontend-generated blökkli
@@ -365,6 +373,11 @@ final class IcmsCatalogBuilder {
       'vocabularyDetails' => $vocabularyDetails,
       'fieldDefinitions' => $fieldDefinitions,
       'optionDefinitions' => $options,
+      // Background pictures of the source the project knows by file name:
+      // decoration the target draws itself (an option), or leaves out.
+      'sourceBackgrounds' => self::sourceBackgroundsFromConfig(
+        $this->configFactory->get('icms_mcp.catalog_options')->get('sourceBackgrounds'),
+      ),
       'nodeTypes' => $indexes['nodeTypes'],
       'paragraphTypes' => $indexes['paragraphTypes'],
       'mediaTypes' => $indexes['mediaTypes'],
@@ -635,6 +648,75 @@ final class IcmsCatalogBuilder {
       }
     }
     return $regions;
+  }
+
+  /**
+   * Source background pictures the project declares, by file name.
+   *
+   * A source row can paint a picture behind its text. The migrator reads
+   * that as text on a picture (a hero) unless the project says the file is
+   * decoration:
+   *
+   * @code
+   * # icms_mcp.catalog_options
+   * sourceBackgrounds:
+   *   - { file: 'Circles Blue.png', option: bgCircles, value: true }
+   *   - { file: 'World map.png' }
+   * @endcode
+   *
+   * With `option` / `value` the target draws the decoration itself: the row
+   * stays what it is without the picture and gets that option. Without them
+   * the picture is left out. `file` is the file name alone, compared without
+   * case; an entry without a file name is dropped, and the first entry for a
+   * file wins.
+   *
+   * @return array<int, array{file: string, option?: string, value?: mixed}>
+   */
+  public static function sourceBackgroundsFromConfig(mixed $declared): array {
+    $backgrounds = [];
+    foreach (is_array($declared) ? $declared : [] as $item) {
+      if (!is_array($item)) {
+        continue;
+      }
+      $file = mb_strtolower(trim(basename(str_replace('\\', '/', (string) ($item['file'] ?? '')))));
+      if ($file === '' || isset($backgrounds[$file])) {
+        continue;
+      }
+      $entry = ['file' => $file];
+      $option = trim((string) ($item['option'] ?? ''));
+      if ($option !== '' && array_key_exists('value', $item) && $item['value'] !== NULL) {
+        $entry['option'] = $option;
+        $entry['value'] = $item['value'];
+      }
+      $backgrounds[$file] = $entry;
+    }
+    ksort($backgrounds);
+    return array_values($backgrounds);
+  }
+
+  /**
+   * File extensions a media bundle's source field accepts, sorted.
+   *
+   * @return string[]
+   */
+  private function mediaFileExtensions(string $bundle): array {
+    /** @var \Drupal\media\MediaTypeInterface|null $mediaType */
+    $mediaType = $this->entityTypeManager->getStorage('media_type')->load($bundle);
+    $definition = $mediaType?->getSource()->getSourceFieldDefinition($mediaType);
+    return self::fileExtensionsFromSetting($definition?->getSetting('file_extensions'));
+  }
+
+  /**
+   * A field's `file_extensions` setting ("png gif jpg") as a sorted list.
+   *
+   * @return string[]
+   */
+  public static function fileExtensionsFromSetting(mixed $setting): array {
+    $extensions = array_values(array_unique(array_filter(
+      preg_split('/[\s,]+/', strtolower(is_string($setting) ? $setting : '')) ?: [],
+    )));
+    sort($extensions);
+    return $extensions;
   }
 
   private function capabilities(array $fields, array $editorial): array {
