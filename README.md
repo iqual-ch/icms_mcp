@@ -157,6 +157,27 @@ option step); without them the picture is left out. Any other background
 picture is treated as before. The list is passed on as the catalog's
 `sourceBackgrounds`, file names lower-cased.
 
+### Enforced values: what every migrated component gets
+
+Some presentation choices belong to the project, not to the migration: every
+title styled as an H1, pictures never cropped, sliders always dark. Declare
+them once:
+
+```yaml
+# icms_mcp.catalog_options
+enforced:
+  - { bundle: icms_layout_text_media, option: imageFormat, value: auto }
+  - { bundle: icms_layout_text_media, option: width, value: narrow }
+  - { bundle: project_layout_hero_slider, option: colorMode, value: dark }
+  - { bundle: '*', field: field_icms_title_style, value: heading-1 }
+```
+
+Each entry names a paragraph `bundle` (`'*'` = every bundle that has it),
+either a blökkli `option` or a paragraph `field`, and the `value`. The content
+migrator writes these last, over its proposal, a reviewer's choice and a
+replayed recipe, and shows them as locked in the cockpit. The list is passed
+on as the catalog's `enforced`.
+
 ### Media: what each bundle's file field accepts
 
 Every media bundle with a file source lists `fileExtensions` in the catalog.

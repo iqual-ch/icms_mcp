@@ -378,6 +378,11 @@ final class IcmsCatalogBuilder {
       'sourceBackgrounds' => self::sourceBackgroundsFromConfig(
         $this->configFactory->get('icms_mcp.catalog_options')->get('sourceBackgrounds'),
       ),
+      // Option and field values the project wants on every migrated
+      // component, whatever the migration proposed or a reviewer chose.
+      'enforced' => self::enforcedFromConfig(
+        $this->configFactory->get('icms_mcp.catalog_options')->get('enforced'),
+      ),
       'nodeTypes' => $indexes['nodeTypes'],
       'paragraphTypes' => $indexes['paragraphTypes'],
       'mediaTypes' => $indexes['mediaTypes'],
@@ -692,6 +697,47 @@ final class IcmsCatalogBuilder {
     }
     ksort($backgrounds);
     return array_values($backgrounds);
+  }
+
+  /**
+   * Option and field values the project enforces on migrated components.
+   *
+   * A project rule, not a migration guess: the importer writes these last,
+   * over the proposal, a reviewer's choice and a replayed recipe.
+   *
+   * @code
+   * # icms_mcp.catalog_options
+   * enforced:
+   *   - { bundle: icms_layout_text_media, option: imageFormat, value: auto }
+   *   - { bundle: project_layout_hero_slider, option: colorMode, value: dark }
+   *   - { bundle: '*', field: field_icms_title_style, value: heading-1 }
+   * @endcode
+   *
+   * `bundle: '*'` applies to every bundle that has the option or field. An
+   * entry needs a bundle, exactly one of `option` / `field`, and a value;
+   * anything else is dropped. A later entry for the same bundle and name
+   * replaces an earlier one.
+   *
+   * @return array<int, array{bundle: string, option?: string, field?: string, value: mixed}>
+   */
+  public static function enforcedFromConfig(mixed $declared): array {
+    $enforced = [];
+    foreach (is_array($declared) ? $declared : [] as $item) {
+      if (!is_array($item) || !array_key_exists('value', $item) || $item['value'] === NULL || $item['value'] === '') {
+        continue;
+      }
+      $bundle = trim((string) ($item['bundle'] ?? ''));
+      $option = trim((string) ($item['option'] ?? ''));
+      $field = trim((string) ($item['field'] ?? ''));
+      if ($bundle === '' || ($option === '') === ($field === '')) {
+        continue;
+      }
+      $kind = $option !== '' ? 'option' : 'field';
+      $name = $option !== '' ? $option : $field;
+      $enforced["$bundle|$kind|$name"] = ['bundle' => $bundle, $kind => $name, 'value' => $item['value']];
+    }
+    ksort($enforced);
+    return array_values($enforced);
   }
 
   /**

@@ -28,6 +28,24 @@ icms_mcp.catalog_options:
           value:
             type: ignore
             label: 'Value of that option'
+    enforced:
+      type: sequence
+      label: 'Option and field values every migrated component gets'
+      sequence:
+        type: mapping
+        mapping:
+          bundle:
+            type: string
+            label: 'Paragraph bundle, or * for every bundle that has the option or field'
+          option:
+            type: string
+            label: 'Blökkli option (set this or field)'
+          field:
+            type: string
+            label: 'Paragraph field (set this or option)'
+          value:
+            type: ignore
+            label: 'The value the import always writes'
 
 icms_mcp.catalog_examples:
   type: config_object
