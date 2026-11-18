@@ -80,7 +80,12 @@ real pages; everything inferred stays in the prose lists. `sourceRegions: [side]
 on a bundle a node's paragraph slot targets (a sidebar bundle) declares that
 content the source placed in a narrow side column belongs in that slot rather
 than in the page content; without it the migrator never moves content between
-slots. `pageFields: [body]` on a NODE type's entry
+slots. `sideBox: { text: <field> }` on a layout that shows body copy with a
+box beside it (a contact person with a portrait) names the text field of that
+box; the migrator can then import a row of main text beside a narrow column of
+side content as that one layout (main text = body, the column's words in the
+named field, its picture in the layout's media field). Without it side content
+is always a component of its own. `pageFields: [body]` on a NODE type's entry
 (`descriptions.node.<bundle>`) declares the node fields this project's page
 template shows on the page itself, outside the paragraphs (a lead above the
 content). The catalog passes it on as `nodeTypes.<bundle>.pageFields`; the

@@ -423,6 +423,7 @@ final class IcmsCatalogBuilder {
         'guidance' => self::guidanceFromEditorial($editorial),
         'sourcePatterns' => self::sourcePatternsFromEditorial($editorial),
         'sourceRegions' => self::sourceRegionsFromEditorial($editorial),
+        'sideBox' => self::sideBoxFromEditorial($editorial),
         'capabilities' => $this->capabilities($fields, $editorial),
         'fields' => $resolved,
         'childBundles' => $this->childBundles($fields),
@@ -653,6 +654,25 @@ final class IcmsCatalogBuilder {
       }
     }
     return $regions;
+  }
+
+  /**
+   * The side box of a layout that shows body copy with a box beside it.
+   *
+   * `sideBox: { text: <field> }` on a description entry says that the layout
+   * puts a box beside its body text (a contact person with a portrait, a
+   * short note) and names the text field that holds the box's words. The
+   * content migrator then knows that a source row of main text beside a
+   * narrow column of side content fits this layout as ONE component: the
+   * main text is the body, the side column's words go in the named field,
+   * its picture in the layout's own media field. Without the declaration no
+   * layout is treated that way and side content stays a component of its
+   * own. An entry without a field name is no declaration.
+   */
+  public static function sideBoxFromEditorial(array $editorial): array {
+    $declared = $editorial['sideBox'] ?? NULL;
+    $text = is_array($declared) ? trim((string) ($declared['text'] ?? '')) : '';
+    return $text !== '' ? ['text' => $text] : [];
   }
 
   /**
