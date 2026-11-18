@@ -62,6 +62,26 @@ final class IcmsCatalogBuilderDescriptionsTest extends UnitTestCase {
   }
 
   /**
+   * A layout's side box declaration reaches the catalog as its text field.
+   *
+   * The migrator folds a row's main text and its side column into one
+   * component only on a layout that declares the box; a guess from field
+   * names would hit layouts that merely have a description.
+   *
+   * @covers ::sideBoxFromEditorial
+   */
+  public function testSideBoxNamesItsTextFieldAndIsOptional(): void {
+    self::assertSame(
+      ['text' => 'field_box_description'],
+      IcmsCatalogBuilder::sideBoxFromEditorial(['sideBox' => ['text' => ' field_box_description ', 'other' => 'x']]),
+    );
+    self::assertSame([], IcmsCatalogBuilder::sideBoxFromEditorial(['summary' => 'No box.']));
+    self::assertSame([], IcmsCatalogBuilder::sideBoxFromEditorial(['sideBox' => ['text' => '']]));
+    // A scalar by mistake is no declaration, not a crash.
+    self::assertSame([], IcmsCatalogBuilder::sideBoxFromEditorial(['sideBox' => 'field_box_description']));
+  }
+
+  /**
    * A project's node type entry names the fields its page template shows;
    * the migrator keeps their content in the field instead of repeating it.
    *
