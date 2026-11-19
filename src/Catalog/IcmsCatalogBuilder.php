@@ -424,6 +424,8 @@ final class IcmsCatalogBuilder {
         'sourcePatterns' => self::sourcePatternsFromEditorial($editorial),
         'sourceRegions' => self::sourceRegionsFromEditorial($editorial),
         'sideBox' => self::sideBoxFromEditorial($editorial),
+        'sourceRowClasses' => self::sourceRowClassesFromEditorial($editorial),
+        'standsInFor' => self::standsInForFromEditorial($editorial),
         'capabilities' => $this->capabilities($fields, $editorial),
         'fields' => $resolved,
         'childBundles' => $this->childBundles($fields),
@@ -673,6 +675,50 @@ final class IcmsCatalogBuilder {
     $declared = $editorial['sideBox'] ?? NULL;
     $text = is_array($declared) ? trim((string) ($declared['text'] ?? '')) : '';
     return $text !== '' ? ['text' => $text] : [];
+  }
+
+  /**
+   * The classes of the source row a layout declares itself the home for.
+   *
+   * `sourceRowClasses: [band-primary]` on a description entry is for a
+   * source row that is a component only by convention: a band of short
+   * facts written as a plain text row with a class on it, which no component
+   * name tells apart from ordinary text. The content migrator gives a source
+   * row carrying ALL the listed classes a section type of its own, named
+   * after this layout, and maps it here before any rule of its own. Class
+   * names are trimmed and de-duplicated, their case kept.
+   */
+  public static function sourceRowClassesFromEditorial(array $editorial): array {
+    $classes = [];
+    foreach ((array) ($editorial['sourceRowClasses'] ?? []) as $item) {
+      $name = trim((string) $item);
+      if ($name !== '' && !in_array($name, $classes, TRUE)) {
+        $classes[] = $name;
+      }
+    }
+    return $classes;
+  }
+
+  /**
+   * The layouts a layout replaces where they are not allowed.
+   *
+   * A section type is mapped once for the whole site, and a node type can
+   * have a layout of its own for the same thing (a product page's hero).
+   * `standsInFor: [icms_layout_hero_image]` on that layout's description
+   * entry says so: on a node type that does not allow the mapped layout but
+   * allows this one, the content migrator imports the section as this
+   * layout instead of falling back to a generic one. Bundle names are
+   * trimmed and de-duplicated.
+   */
+  public static function standsInForFromEditorial(array $editorial): array {
+    $bundles = [];
+    foreach ((array) ($editorial['standsInFor'] ?? []) as $item) {
+      $name = trim((string) $item);
+      if ($name !== '' && !in_array($name, $bundles, TRUE)) {
+        $bundles[] = $name;
+      }
+    }
+    return $bundles;
   }
 
   /**
