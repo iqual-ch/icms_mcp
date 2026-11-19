@@ -85,7 +85,15 @@ box beside it (a contact person with a portrait) names the text field of that
 box; the migrator can then import a row of main text beside a narrow column of
 side content as that one layout (main text = body, the column's words in the
 named field, its picture in the layout's media field). Without it side content
-is always a component of its own. `pageFields: [body]` on a NODE type's entry
+is always a component of its own. `sourceRowClasses: [<class>, …]` on a layout
+is for a source row that is a component only by convention (a band of short
+facts written as a plain text row with a class on it): the migrator types a row
+carrying all the listed classes after this layout and maps it here.
+`standsInFor: [<bundle>, …]` on a layout that only some node types allow (a
+product page's own hero) names the layouts it replaces there: a section type is
+mapped once for the whole site, and on a node type that does not allow the
+mapped layout but allows this one, the section is imported as this one instead
+of a generic fallback. `pageFields: [body]` on a NODE type's entry
 (`descriptions.node.<bundle>`) declares the node fields this project's page
 template shows on the page itself, outside the paragraphs (a lead above the
 content). The catalog passes it on as `nodeTypes.<bundle>.pageFields`; the

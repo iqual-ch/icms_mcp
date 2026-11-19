@@ -96,4 +96,35 @@ final class IcmsCatalogBuilderDescriptionsTest extends UnitTestCase {
     self::assertSame(['body'], IcmsCatalogBuilder::pageFieldsFromEditorial(['pageFields' => 'body']));
   }
 
+  /**
+   * A layout names the source row it is the home for by that row's classes.
+   *
+   * A band of short facts is a plain text row with a class on it; no
+   * component name says what it is, so the project lists the classes.
+   *
+   * @covers ::sourceRowClassesFromEditorial
+   */
+  public function testSourceRowClassesAreTrimmedDeduplicatedAndOptional(): void {
+    self::assertSame(
+      ['band-primary', 'Product-Page'],
+      IcmsCatalogBuilder::sourceRowClassesFromEditorial(['sourceRowClasses' => [' band-primary ', 'Product-Page', 'band-primary', '']]),
+    );
+    self::assertSame([], IcmsCatalogBuilder::sourceRowClassesFromEditorial(['summary' => 'No recipe.']));
+    self::assertSame(['band-primary'], IcmsCatalogBuilder::sourceRowClassesFromEditorial(['sourceRowClasses' => 'band-primary']));
+  }
+
+  /**
+   * A layout names the layouts it replaces where they are not allowed.
+   *
+   * @covers ::standsInForFromEditorial
+   */
+  public function testStandsInForListsBundlesAndIsOptional(): void {
+    self::assertSame(
+      ['icms_layout_hero_image'],
+      IcmsCatalogBuilder::standsInForFromEditorial(['standsInFor' => [' icms_layout_hero_image ', 'icms_layout_hero_image', '']]),
+    );
+    self::assertSame([], IcmsCatalogBuilder::standsInForFromEditorial(['summary' => 'No stand-in.']));
+    self::assertSame(['icms_layout_text'], IcmsCatalogBuilder::standsInForFromEditorial(['standsInFor' => 'icms_layout_text']));
+  }
+
 }
