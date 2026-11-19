@@ -65,6 +65,14 @@ clone and the imported list is the one that stays. On a target that ships detach
 field is translatable for every page: an attached page still takes the
 symmetric path, which is why `structureMatch` decides and not the field.
 
+The catalog manifest lists the published items of the paragraphs library
+(`libraryItems`: id, uuid, label, the component each holds and that component's
+title per language). A migration links a source section to the item holding the
+same block (a `from_library` component whose reference names the item by
+`{uuid}` or `{target_id}`) instead of creating the block on every page. The
+import never creates a library item; a reference to an item that is gone is
+left empty with a warning.
+
 `get_icms_catalog` intentionally replaces the old expanded v1 response. Use
 `get_icms_component_contract` for details; clients should cache by
 `catalogHash`. Component guidance and option definitions ship under `resources/`,

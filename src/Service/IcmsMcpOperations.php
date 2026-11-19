@@ -2889,6 +2889,25 @@ final class IcmsMcpOperations {
       return;
     }
 
+    if ($field_type === 'entity_reference' && $target_type === 'paragraphs_library_item') {
+      // A link to a reusable component the catalog listed (`libraryItems`),
+      // by uuid or id. Nothing is created here: an item that is gone leaves
+      // the field empty and says so rather than pointing at nothing.
+      $item_id = $this->resolveLibraryItemReference($value);
+      if ($item_id === NULL) {
+        $this->mediaWarnings[] = sprintf(
+          "Field '%s' on %s:%s: the library item it names does not exist on this site — left empty",
+          $name,
+          $entity->getEntityTypeId(),
+          $entity->bundle(),
+        );
+        $entity->set($name, []);
+        return;
+      }
+      $entity->set($name, [['target_id' => $item_id]]);
+      return;
+    }
+
     if ($field_type === 'tablefield') {
       $entity->set($name, $this->buildTablefieldValue($value, $name, (string) $entity->bundle()));
       return;
@@ -2923,6 +2942,35 @@ final class IcmsMcpOperations {
     }
 
     $entity->set($name, $this->normalizeFieldValue($definition, $value));
+  }
+
+  /**
+   * The id of an existing paragraphs library item named by uuid or id.
+   *
+   * @param mixed $value
+   *   `{uuid}` or `{target_id}` (or a bare id); a list is read by its first
+   *   entry.
+   */
+  protected function resolveLibraryItemReference(mixed $value): ?int {
+    if (!$this->entityTypeManager->hasDefinition('paragraphs_library_item')) {
+      return NULL;
+    }
+    if (is_array($value) && array_is_list($value)) {
+      $value = $value[0] ?? NULL;
+    }
+    $storage = $this->entityTypeManager->getStorage('paragraphs_library_item');
+    $uuid = is_array($value) ? trim((string) ($value['uuid'] ?? '')) : '';
+    if ($uuid !== '') {
+      $items = $storage->loadByProperties(['uuid' => $uuid]);
+      $item = $items ? reset($items) : NULL;
+      return $item ? (int) $item->id() : NULL;
+    }
+    $id = is_array($value) ? ($value['target_id'] ?? $value['id'] ?? NULL) : $value;
+    if (!is_scalar($id) || !ctype_digit((string) $id)) {
+      return NULL;
+    }
+    $item = $storage->load((int) $id);
+    return $item ? (int) $item->id() : NULL;
   }
 
   /**
