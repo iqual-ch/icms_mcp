@@ -8,6 +8,8 @@ use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Entity\EntityFieldManagerInterface;
 use Drupal\Core\Entity\EntityTypeBundleInfoInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
+use Drupal\Core\Entity\FieldableEntityInterface;
+use Drupal\Core\Entity\TranslatableInterface;
 use Drupal\Core\Extension\ModuleExtensionList;
 use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
@@ -23,6 +25,11 @@ final class IcmsCatalogBuilder {
    * ICMS node base field (ICMS-768, unreleased): a page whose translations own their paragraphs.
    */
   public const DETACHED_CONTENT_FLAG = 'icms_detached_content';
+
+  /**
+   * The field a library item's component carries its title in.
+   */
+  public const LIBRARY_TITLE_FIELD = 'field_icms_title';
 
   private ?array $descriptionCache = NULL;
 
@@ -71,6 +78,76 @@ final class IcmsCatalogBuilder {
       return [];
     }
     return self::webformEntries($this->entityTypeManager->getStorage('webform')->loadMultiple());
+  }
+
+  /**
+   * The published items of the paragraphs library, with what each one holds.
+   */
+  private function libraryItems(): array {
+    if (!$this->entityTypeManager->hasDefinition('paragraphs_library_item')) {
+      return [];
+    }
+    $rows = [];
+    foreach ($this->entityTypeManager->getStorage('paragraphs_library_item')->loadMultiple() as $item) {
+      if (method_exists($item, 'isPublished') && !$item->isPublished()) {
+        continue;
+      }
+      $paragraph = $item instanceof FieldableEntityInterface && $item->hasField('paragraphs')
+        ? $item->get('paragraphs')->entity
+        : NULL;
+      $titles = [];
+      if ($paragraph instanceof TranslatableInterface && $paragraph instanceof FieldableEntityInterface && $paragraph->hasField(self::LIBRARY_TITLE_FIELD)) {
+        foreach (array_keys($paragraph->getTranslationLanguages()) as $langcode) {
+          $titles[$langcode] = (string) $paragraph->getTranslation($langcode)->get(self::LIBRARY_TITLE_FIELD)->value;
+        }
+      }
+      $rows[] = [
+        'id' => $item->id(),
+        'uuid' => $item->uuid(),
+        'label' => $item->label(),
+        'bundle' => $paragraph?->bundle(),
+        'titles' => $titles,
+      ];
+    }
+    return self::libraryItemEntries($rows);
+  }
+
+  /**
+   * `[{id, uuid, label, bundle, titles}]` for library items, sorted by label.
+   *
+   * `bundle` is the component the item holds and `titles` that component's
+   * title per language, tags stripped: what a migration compares a source
+   * section's heading with. An item without a uuid is left out, a language
+   * without a title too.
+   *
+   * @param array<int, array<string, mixed>> $rows
+   *   One row per library item: id, uuid, label, bundle, titles by langcode.
+   */
+  public static function libraryItemEntries(array $rows): array {
+    $entries = [];
+    foreach ($rows as $row) {
+      $uuid = trim((string) ($row['uuid'] ?? ''));
+      if ($uuid === '') {
+        continue;
+      }
+      $titles = [];
+      foreach ((array) ($row['titles'] ?? []) as $langcode => $title) {
+        $title = trim(preg_replace('/\s+/u', ' ', html_entity_decode(strip_tags((string) $title), ENT_QUOTES | ENT_HTML5)) ?? '');
+        if ($title !== '') {
+          $titles[(string) $langcode] = $title;
+        }
+      }
+      ksort($titles);
+      $entries[] = [
+        'id' => (int) ($row['id'] ?? 0),
+        'uuid' => $uuid,
+        'label' => trim((string) ($row['label'] ?? '')),
+        'bundle' => trim((string) ($row['bundle'] ?? '')),
+        'titles' => $titles,
+      ];
+    }
+    usort($entries, static fn(array $a, array $b): int => [$a['label'], $a['uuid']] <=> [$b['label'], $b['uuid']]);
+    return $entries;
   }
 
   /**
@@ -364,6 +441,11 @@ final class IcmsCatalogBuilder {
       // whether the module exists at all — a source that ships forms needs it.
       'webforms' => $this->webforms(),
       'webformModuleInstalled' => $this->entityTypeManager->hasDefinition('webform'),
+      // The reusable components editors keep in the paragraphs library (a
+      // block of accreditation logos shown on many pages). A migration links
+      // a source section to the item that holds the same block instead of
+      // creating that block again on every page; it never creates an item.
+      'libraryItems' => $this->libraryItems(),
       // The rich-text styles the editor offers (CKEditor 5 style plugin +
       // the format's allowed classes): what a source's `lead` / `small` /
       // blockquote text can bind to, and what a design handoff's type scale
