@@ -859,14 +859,18 @@ final class IcmsCatalogBuilder {
    *   - { bundle: icms_layout_text_media, option: imageFormat, value: auto }
    *   - { bundle: project_layout_hero_slider, option: colorMode, value: dark }
    *   - { bundle: '*', field: field_icms_title_style, value: heading-1 }
+   *   - { bundle: icms_layout_teasers, option: teaserVariant, value: text, node_type: icms_product, when: no-picture }
    * @endcode
    *
    * `bundle: '*'` applies to every bundle that has the option or field. An
    * entry needs a bundle, exactly one of `option` / `field`, and a value;
-   * anything else is dropped. A later entry for the same bundle and name
-   * replaces an earlier one.
+   * anything else is dropped. `node_type` limits the entry to pages of that
+   * content type; `when` to components whose source section has a picture
+   * (`picture`) or none (`no-picture`); an unknown `when` drops the entry. A
+   * later entry for the same bundle, name, node type and condition replaces
+   * an earlier one.
    *
-   * @return array<int, array{bundle: string, option?: string, field?: string, value: mixed}>
+   * @return array<int, array{bundle: string, option?: string, field?: string, value: mixed, nodeType?: string, when?: string}>
    */
   public static function enforcedFromConfig(mixed $declared): array {
     $enforced = [];
@@ -877,12 +881,21 @@ final class IcmsCatalogBuilder {
       $bundle = trim((string) ($item['bundle'] ?? ''));
       $option = trim((string) ($item['option'] ?? ''));
       $field = trim((string) ($item['field'] ?? ''));
-      if ($bundle === '' || ($option === '') === ($field === '')) {
+      $node_type = trim((string) ($item['node_type'] ?? ''));
+      $when = trim((string) ($item['when'] ?? ''));
+      if ($bundle === '' || ($option === '') === ($field === '') || !in_array($when, ['', 'picture', 'no-picture'], TRUE)) {
         continue;
       }
       $kind = $option !== '' ? 'option' : 'field';
       $name = $option !== '' ? $option : $field;
-      $enforced["$bundle|$kind|$name"] = ['bundle' => $bundle, $kind => $name, 'value' => $item['value']];
+      $entry = ['bundle' => $bundle, $kind => $name, 'value' => $item['value']];
+      if ($node_type !== '') {
+        $entry['nodeType'] = $node_type;
+      }
+      if ($when !== '') {
+        $entry['when'] = $when;
+      }
+      $enforced["$bundle|$kind|$name|$node_type|$when"] = $entry;
     }
     ksort($enforced);
     return array_values($enforced);

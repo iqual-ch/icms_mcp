@@ -45,6 +45,22 @@ final class IcmsCatalogBuilderEnforcedTest extends UnitTestCase {
   /**
    * @covers ::enforcedFromConfig
    */
+  public function testAnEntryCanBeLimitedToANodeTypeAndAPictureCondition(): void {
+    self::assertSame([
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'text', 'nodeType' => 'product', 'when' => 'no-picture'],
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'image', 'nodeType' => 'product', 'when' => 'picture'],
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'card'],
+    ], IcmsCatalogBuilder::enforcedFromConfig([
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'text', 'node_type' => 'product', 'when' => 'no-picture'],
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'image', 'node_type' => ' product ', 'when' => 'picture'],
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'card'],
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'card', 'when' => 'sometimes'],
+    ]));
+  }
+
+  /**
+   * @covers ::enforcedFromConfig
+   */
   public function testALaterEntryReplacesAnEarlierOne(): void {
     self::assertSame([
       ['bundle' => 'x', 'option' => 'width', 'value' => 'narrow'],

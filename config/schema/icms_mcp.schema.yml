@@ -46,6 +46,12 @@ icms_mcp.catalog_options:
           value:
             type: ignore
             label: 'The value the import always writes'
+          node_type:
+            type: string
+            label: 'Only on pages of this content type (empty = every type)'
+          when:
+            type: string
+            label: 'Only when the source section has a picture (picture) or none (no-picture); empty = always'
 
 icms_mcp.catalog_examples:
   type: config_object
