@@ -199,6 +199,33 @@ migrator writes these last, over its proposal, a reviewer's choice and a
 replayed recipe, and shows them as locked in the cockpit. The list is passed
 on as the catalog's `enforced`.
 
+An entry can be limited: `node_type` to pages of one content type, `when` to
+components whose source section has a picture (`picture`) or none
+(`no-picture`), and `text_longer_than` to components where a paragraph of an
+item's text is longer than that many characters — for a theme that cuts item
+text after a few lines:
+
+```yaml
+  - { bundle: icms_layout_cards, option: cardVariant, value: fact, text_longer_than: 130 }
+```
+
+### Text classes: how the source's text styles are written
+
+A source text style (a lead paragraph, small print) arrives as a class the
+target's text format does not know. Say what it becomes:
+
+```yaml
+# icms_mcp.catalog_options
+textClasses:
+  - { from: p.lead, to: 'p.text-lead > span.text-primary' }
+```
+
+`from` is one element with one class; `to` the markup written instead, outer
+to inner: the element takes the first step's tag and classes, each further
+step wraps its content. The classes must be ones the text format allows. The
+list is passed on as the catalog's `textClasses`; without it the class is
+passed on unchanged.
+
 ### Media: what each bundle's file field accepts
 
 Every media bundle with a file source lists `fileExtensions` in the catalog.

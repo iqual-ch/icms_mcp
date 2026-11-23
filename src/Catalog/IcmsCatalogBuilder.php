@@ -465,6 +465,11 @@ final class IcmsCatalogBuilder {
       'enforced' => self::enforcedFromConfig(
         $this->configFactory->get('icms_mcp.catalog_options')->get('enforced'),
       ),
+      // Source text classes the project spells another way in its own text
+      // format: a source's lead paragraph → the format's lead style.
+      'textClasses' => self::textClassesFromConfig(
+        $this->configFactory->get('icms_mcp.catalog_options')->get('textClasses'),
+      ),
       'nodeTypes' => $indexes['nodeTypes'],
       'paragraphTypes' => $indexes['paragraphTypes'],
       'mediaTypes' => $indexes['mediaTypes'],
@@ -860,17 +865,21 @@ final class IcmsCatalogBuilder {
    *   - { bundle: project_layout_hero_slider, option: colorMode, value: dark }
    *   - { bundle: '*', field: field_icms_title_style, value: heading-1 }
    *   - { bundle: icms_layout_teasers, option: teaserVariant, value: text, node_type: icms_product, when: no-picture }
+   *   - { bundle: icms_layout_cards, option: cardVariant, value: fact, text_longer_than: 130 }
    * @endcode
    *
    * `bundle: '*'` applies to every bundle that has the option or field. An
    * entry needs a bundle, exactly one of `option` / `field`, and a value;
    * anything else is dropped. `node_type` limits the entry to pages of that
    * content type; `when` to components whose source section has a picture
-   * (`picture`) or none (`no-picture`); an unknown `when` drops the entry. A
-   * later entry for the same bundle, name, node type and condition replaces
-   * an earlier one.
+   * (`picture`) or none (`no-picture`); an unknown `when` drops the entry.
+   * `text_longer_than` limits it to components where a paragraph of an
+   * item's text is longer than that many characters (a theme that cuts item
+   * text after a few lines); a limit that is not a positive whole number
+   * drops the entry. A later entry for the same bundle, name, node type and
+   * conditions replaces an earlier one.
    *
-   * @return array<int, array{bundle: string, option?: string, field?: string, value: mixed, nodeType?: string, when?: string}>
+   * @return array<int, array{bundle: string, option?: string, field?: string, value: mixed, nodeType?: string, when?: string, textLongerThan?: int}>
    */
   public static function enforcedFromConfig(mixed $declared): array {
     $enforced = [];
@@ -886,6 +895,16 @@ final class IcmsCatalogBuilder {
       if ($bundle === '' || ($option === '') === ($field === '') || !in_array($when, ['', 'picture', 'no-picture'], TRUE)) {
         continue;
       }
+      $longer_than = $item['text_longer_than'] ?? NULL;
+      if ($longer_than !== NULL && $longer_than !== '') {
+        if (is_bool($longer_than) || !ctype_digit(trim((string) $longer_than)) || (int) $longer_than <= 0) {
+          continue;
+        }
+        $longer_than = (int) $longer_than;
+      }
+      else {
+        $longer_than = 0;
+      }
       $kind = $option !== '' ? 'option' : 'field';
       $name = $option !== '' ? $option : $field;
       $entry = ['bundle' => $bundle, $kind => $name, 'value' => $item['value']];
@@ -895,10 +914,54 @@ final class IcmsCatalogBuilder {
       if ($when !== '') {
         $entry['when'] = $when;
       }
-      $enforced["$bundle|$kind|$name|$node_type|$when"] = $entry;
+      if ($longer_than > 0) {
+        $entry['textLongerThan'] = $longer_than;
+      }
+      $enforced["$bundle|$kind|$name|$node_type|$when|$longer_than"] = $entry;
     }
     ksort($enforced);
     return array_values($enforced);
+  }
+
+  /**
+   * The project's text class map, from `icms_mcp.catalog_options`.
+   *
+   * @code
+   * # icms_mcp.catalog_options
+   * textClasses:
+   *   - { from: p.lead, to: 'p.text-lead > span.text-primary' }
+   * @endcode
+   *
+   * `from` is one source element with one class (`tag.class`); `to` the
+   * markup the migration writes instead, outer to inner, each step a tag
+   * with any number of classes. The element takes the first step's tag and
+   * classes; each further step wraps its content. An entry with another
+   * shape is dropped; a later entry for the same `from` replaces an earlier
+   * one.
+   *
+   * @return array<int, array{from: string, to: string}>
+   */
+  public static function textClassesFromConfig(mixed $declared): array {
+    $step = '/^[a-z][a-z0-9]*(\.[A-Za-z0-9_-]+)*$/';
+    $entries = [];
+    foreach (is_array($declared) ? $declared : [] as $item) {
+      if (!is_array($item)) {
+        continue;
+      }
+      $from = trim((string) ($item['from'] ?? ''));
+      $steps = array_map('trim', explode('>', (string) ($item['to'] ?? '')));
+      if (!preg_match('/^[a-z][a-z0-9]*\.[A-Za-z0-9_-]+$/', $from)) {
+        continue;
+      }
+      foreach ($steps as $one) {
+        if (!preg_match($step, $one)) {
+          continue 2;
+        }
+      }
+      $entries[$from] = ['from' => $from, 'to' => implode(' > ', $steps)];
+    }
+    ksort($entries);
+    return array_values($entries);
   }
 
   /**

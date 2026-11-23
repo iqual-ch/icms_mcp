@@ -70,4 +70,20 @@ final class IcmsCatalogBuilderEnforcedTest extends UnitTestCase {
     ]));
   }
 
+  /**
+   * @covers ::enforcedFromConfig
+   */
+  public function testAnEntryCanBeLimitedToLongItemText(): void {
+    self::assertSame([
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'card'],
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'tile', 'textLongerThan' => 130],
+    ], IcmsCatalogBuilder::enforcedFromConfig([
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'tile', 'text_longer_than' => '130'],
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'card', 'text_longer_than' => ''],
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'bad', 'text_longer_than' => 'many'],
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'bad', 'text_longer_than' => 0],
+      ['bundle' => 'x', 'option' => 'variant', 'value' => 'bad', 'text_longer_than' => TRUE],
+    ]));
+  }
+
 }

@@ -52,6 +52,21 @@ icms_mcp.catalog_options:
           when:
             type: string
             label: 'Only when the source section has a picture (picture) or none (no-picture); empty = always'
+          text_longer_than:
+            type: integer
+            label: 'Only when a paragraph of an item text is longer than this many characters; empty = always'
+    textClasses:
+      type: sequence
+      label: 'Source text classes the project writes as other markup'
+      sequence:
+        type: mapping
+        mapping:
+          from:
+            type: string
+            label: 'Source element and class, e.g. p.lead'
+          to:
+            type: string
+            label: 'Target markup, outer to inner, e.g. p.text-lead > span.text-primary'
 
 icms_mcp.catalog_examples:
   type: config_object
