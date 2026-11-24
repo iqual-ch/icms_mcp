@@ -51,7 +51,7 @@ chosen by the spec, never by the field's translatability alone:
 | `structureMatch: true` | into translations of the **shared** paragraph entities, by position, after a structure re-check | `symmetric` |
 | `structureMatch: true` on a node flagged `icms_detached_content` | its **own** tree, built from the same specs as `mode: "detached"` (see below) | `detached`, with a `note` |
 | `mode: "detached"` | its **own** single-language paragraph tree on the translation's field rows (ICMS detached content, ICMS-768 — unreleased) | `detached` |
-| neither | scalar node fields only, with the `reason` | `shared` |
+| neither | scalar node fields only, with the `reason` | `shared` (`cloned` on a flagged node, see below) |
 
 Detached needs two things on the target, both reported by the catalog: the bundle's
 layouts field translatable (`nodeTypes.<bundle>.paragraphsFieldTranslatable`) and the
@@ -76,6 +76,14 @@ the default language references are never deleted. A tree the target cannot hold
 (an unknown field or bundle, nesting deeper than 8) costs that language's sections
 only: its paragraphs roll back, the page and the other languages are still
 imported, and the summary entry gives the `reason`.
+
+A translation of a flagged node that has no sections of its own (`structureMatch:
+false`, no paragraphs, an unstamped spec, or a tree that failed as above) is never
+saved empty: it gets the default language's sections, which ICMS clones into its
+language (`paragraphs_mode: cloned`, untranslated text, with a `note`). If a
+translation of a flagged node still ends up without sections while the default
+language's list is not empty, its summary entry has `status: error` and an `error`
+text, and the text is also added to the import's `warnings`.
 
 The catalog manifest lists the published items of the paragraphs library
 (`libraryItems`: id, uuid, label, the component each holds and that component's

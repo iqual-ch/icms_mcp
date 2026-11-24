@@ -840,6 +840,13 @@ final class IcmsMcpOperations {
           $result['warnings'] = array_merge($this->optionWarnings, $this->mediaWarnings, $this->aliasWarnings);
           $result['media_skipped_count'] = count($this->mediaWarnings);
         }
+        // A translation that renders without its sections is said at the
+        // top level too, first: a migrator reading only `warnings` must not
+        // take the page for a clean import.
+        $translation_warnings = self::translationErrorWarnings($result['translations']);
+        if ($translation_warnings) {
+          $result['warnings'] = array_merge($translation_warnings, $result['warnings'] ?? []);
+        }
       }
       // Documents linked from text but placed in no field: created as media
       // now so the post-import pass can point the links at their files.
@@ -2244,7 +2251,13 @@ final class IcmsMcpOperations {
    * hook clones the new translation's own, empty, list). Summary:
    * `paragraphs_mode: detached` with a `note`. A language's own tree that
    * fails to build rolls back to a savepoint and costs that language's
-   * sections only (summary `reason`), never the page.
+   * sections only (summary `reason`), never the page. Any translation of a
+   * flagged node that would be saved with no sections of its own (no
+   * specs, mismatched, unstamped, or a failed tree) gets the original's
+   * list, which the hook clones into its language (`paragraphs_mode:
+   * cloned`, with a `note`). One that still ends up empty while the
+   * original's list is not empty is reported with `status: error` (and in
+   * the import's `warnings`), never as a success.
    *
    * @param int $nid
    *   The saved default-language node ID.
@@ -2427,7 +2440,43 @@ final class IcmsMcpOperations {
         }
       }
 
+      // Safety net for a detached node: a translation about to be saved with
+      // no sections of its own (no specs, a structure mismatch, an unstamped
+      // spec, or an own tree that failed above) gets the original's list.
+      // The ICMS presave hook then clones it into this language — a new
+      // translation because it is new, an existing one because it shares
+      // paragraphs — so the page shows the default language's sections
+      // instead of none.
+      // Only a detached node has the layouts field for certain: a scalar-only
+      // import may target a bundle without it.
+      $original_layouts = $node_detached ? $node->getUntranslated()->get($layouts_field) : NULL;
+      if (
+        $node_detached
+        && $original_layouts !== NULL
+        && $translation->get($layouts_field)->isEmpty()
+        && !$original_layouts->isEmpty()
+      ) {
+        $translation->set($layouts_field, $original_layouts->getValue());
+        $paragraphs_mode = 'cloned';
+        $paragraphs_note = 'The node is detached content and this language brought no sections of its own; the default language\'s sections were cloned for it (untranslated text). Translate them on the target or re-import with paragraphs.';
+      }
+
       $translation->save();
+
+      // A translation of a detached node renders only its own list: saved
+      // empty while the original has sections, the page shows nothing in
+      // this language. Never a success, whatever was written before.
+      $sections_missing = $node_detached
+        && $original_layouts !== NULL
+        && $translation->get($layouts_field)->isEmpty()
+        && !$original_layouts->isEmpty();
+      if ($sections_missing) {
+        $paragraphs_translated = FALSE;
+        $this->logger->error('icms_mcp: translation @langcode of node @nid was saved without sections on a detached node.', [
+          '@langcode' => $langcode,
+          '@nid' => $nid,
+        ]);
+      }
 
       // Best-effort cleanup of this language's previous paragraph set,
       // after the translation save committed the new references.
@@ -2454,11 +2503,20 @@ final class IcmsMcpOperations {
       if ($paragraphs_note !== NULL) {
         $entry['note'] = $paragraphs_note;
       }
+      if ($sections_missing) {
+        $entry['status'] = 'error';
+        $entry['error'] = 'The node is detached content and this translation was saved without sections: the page renders empty in this language. Re-import the page.';
+      }
+      // What the language shows instead of its own sections: on a detached
+      // node a clone of the default language's, otherwise the shared ones.
+      $instead = $paragraphs_mode === 'cloned'
+        ? 'the default language\'s sections were cloned for it'
+        : 'paragraphs stay shared';
       if ($detached_reason !== NULL) {
         $entry['reason'] = $detached_reason;
       }
       elseif ($own_tree_reason !== NULL) {
-        $entry['reason'] = "This language's own sections could not be written ({$own_tree_reason}); scalar fields were translated.";
+        $entry['reason'] = "This language's own sections could not be written ({$own_tree_reason}); scalar fields were translated, {$instead}.";
       }
       elseif (($translation_spec['structureMatch'] ?? NULL) === FALSE) {
         $entry['reason'] = (string) ($translation_spec['structureReason']
@@ -2466,8 +2524,8 @@ final class IcmsMcpOperations {
       }
       elseif ($paragraph_specs && !$paragraphs_translated) {
         $entry['reason'] = $symmetric_reason !== NULL
-          ? "Symmetric translation aborted ({$symmetric_reason}); scalar fields were translated, paragraphs stay shared."
-          : 'The translation is neither structure-matched nor detached; scalar fields were translated, paragraphs stay shared.';
+          ? "Symmetric translation aborted ({$symmetric_reason}); scalar fields were translated, {$instead}."
+          : "The translation is neither structure-matched nor detached; scalar fields were translated, {$instead}.";
       }
       if ($untranslated_fields) {
         // Fields whose target config keeps them shared across languages —
@@ -2494,6 +2552,25 @@ final class IcmsMcpOperations {
     }
 
     return $summary;
+  }
+
+  /**
+   * Import-level warnings for translation summary entries that failed.
+   *
+   * @param array $summary
+   *   The writeTranslations() summary.
+   *
+   * @return string[]
+   *   One line per entry with `status: error`, naming its language.
+   */
+  public static function translationErrorWarnings(array $summary): array {
+    $warnings = [];
+    foreach ($summary as $entry) {
+      if (is_array($entry) && ($entry['status'] ?? NULL) === 'error') {
+        $warnings[] = sprintf("translation '%s': %s", $entry['langcode'] ?? '?', $entry['error'] ?? 'not written');
+      }
+    }
+    return $warnings;
   }
 
   /**

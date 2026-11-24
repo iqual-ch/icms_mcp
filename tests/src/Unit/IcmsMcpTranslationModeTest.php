@@ -89,6 +89,24 @@ final class IcmsMcpTranslationModeTest extends UnitTestCase {
   }
 
   /**
+   * A failed translation reaches the import's top-level warnings.
+   *
+   * @covers ::translationErrorWarnings
+   */
+  public function testTranslationErrorWarnings(): void {
+    $summary = [
+      ['langcode' => 'fr', 'status' => 'ok', 'paragraphs_mode' => 'detached'],
+      ['langcode' => 'it', 'status' => 'error', 'error' => 'saved without sections'],
+      ['langcode' => 'en', 'status' => 'skipped', 'reason' => 'Language is not enabled on the target site.'],
+    ];
+    self::assertSame(
+      ["translation 'it': saved without sections"],
+      IcmsMcpOperations::translationErrorWarnings($summary),
+    );
+    self::assertSame([], IcmsMcpOperations::translationErrorWarnings([]));
+  }
+
+  /**
    * The flag the default-language import sets is the one ICMS reads.
    */
   public function testFlagFieldName(): void {

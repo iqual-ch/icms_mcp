@@ -233,6 +233,103 @@ class IcmsMcpDetachedTranslationTest extends KernelTestBase {
   }
 
   /**
+   * A translation without sections of its own gets the original's, cloned.
+   *
+   * A new language shipped without paragraphs (structure mismatch) and an
+   * existing translation an earlier import saved empty: neither stays empty.
+   */
+  public function testTranslationWithoutSpecsIsNeverSavedEmpty(): void {
+    $nid = $this->importDefault();
+    // The broken state an earlier import left behind: Italian exists with
+    // no rows of its own.
+    $this->reload($nid)->addTranslation('it', ['title' => 'IT'])->save();
+    $node = $this->reload($nid);
+    $this->assertSame([], $this->ids($node->getTranslation('it')));
+    $de_ids = $this->ids($node);
+
+    $summary = $this->keyed($this->writeTranslations($nid, [
+      $this->withoutSectionsSpec('fr'),
+      $this->withoutSectionsSpec('it'),
+    ]));
+
+    $node = $this->reload($nid);
+    $this->assertSame($de_ids, $this->ids($node));
+    $this->assertSame(['A', 'B'], $this->texts($node));
+    foreach (['fr', 'it'] as $langcode) {
+      $this->assertSame('ok', $summary[$langcode]['status']);
+      $this->assertSame('cloned', $summary[$langcode]['paragraphs_mode']);
+      $this->assertFalse($summary[$langcode]['paragraphs_translated']);
+      $this->assertArrayHasKey('note', $summary[$langcode]);
+      $this->assertStringNotContainsString('stay shared', $summary[$langcode]['reason']);
+      $translation = $node->getTranslation($langcode);
+      $ids = $this->ids($translation);
+      $this->assertCount(2, $ids, "{$langcode} has sections.");
+      $this->assertEmpty(array_intersect($de_ids, $ids), "{$langcode} owns clones, not the original's paragraphs.");
+      $this->assertSame(2, $this->rowCount($nid, $langcode));
+      $this->assertSame(['A', 'B'], $this->texts($translation));
+      $this->assertTreeLanguage($translation, $langcode);
+    }
+  }
+
+  /**
+   * A tree the target cannot hold costs that language only, not the page.
+   *
+   * Inside the import's transaction, as in import_pivot: the language's
+   * half-built paragraphs roll back to its savepoint, it gets the cloned
+   * sections, and the other language and the default list are kept.
+   */
+  public function testFailedTreeCostsThatLanguageOnly(): void {
+    $nid = $this->importDefault();
+    $de_ids = $this->ids($this->reload($nid));
+    $broken = $this->matchedSpec('it', 'v1');
+    $broken['paragraphs'][1]['attributes']['field_missing'] = 'x';
+
+    $transaction = $this->container->get('database')->startTransaction('icms_mcp_import');
+    $summary = $this->keyed($this->writeTranslations($nid, [
+      $this->matchedSpec('fr', 'v1'),
+      $broken,
+    ]));
+    unset($transaction);
+
+    $this->assertSame('ok', $summary['it']['status']);
+    $this->assertSame('cloned', $summary['it']['paragraphs_mode']);
+    $this->assertFalse($summary['it']['paragraphs_translated']);
+    $this->assertStringContainsString('field_missing', $summary['it']['reason']);
+    $this->assertStringContainsString('cloned', $summary['it']['reason']);
+    $this->assertSame('detached', $summary['fr']['paragraphs_mode']);
+
+    $node = $this->reload($nid);
+    $this->assertSame($de_ids, $this->ids($node));
+    $this->assertSame(['A', 'B'], $this->texts($node));
+    $this->assertSame(['A (fr v1)', 'B (fr v1)'], $this->texts($node->getTranslation('fr')));
+    $this->assertSame(['A', 'B'], $this->texts($node->getTranslation('it')));
+    // Three per language (container, its child, text): nothing left over
+    // from the Italian tree that failed.
+    $this->assertCount(9, $this->allParagraphIds());
+  }
+
+  /**
+   * A translation of a detached node left without sections is an error.
+   *
+   * The default list references paragraphs that no longer exist, so the
+   * clone has nothing to copy.
+   */
+  public function testTranslationSavedWithoutSectionsIsAnError(): void {
+    $nid = $this->importDefault();
+    $de_ids = $this->ids($this->reload($nid));
+    foreach (Paragraph::loadMultiple($de_ids) as $paragraph) {
+      $paragraph->delete();
+    }
+
+    $summary = $this->keyed($this->writeTranslations($nid, [$this->withoutSectionsSpec('it')]));
+
+    $this->assertSame('error', $summary['it']['status']);
+    $this->assertFalse($summary['it']['paragraphs_translated']);
+    $this->assertArrayHasKey('error', $summary['it']);
+    $this->assertSame([], $this->ids($this->reload($nid)->getTranslation('it')));
+  }
+
+  /**
    * Import the default language (de) as the migration does.
    */
   private function importDefault(?int $nid = NULL, bool $detached = TRUE): int {
@@ -292,6 +389,19 @@ class IcmsMcpDetachedTranslationTest extends KernelTestBase {
           'options' => [],
         ],
       ],
+    ];
+  }
+
+  /**
+   * A translation shipped without sections (its structure differs).
+   */
+  private function withoutSectionsSpec(string $langcode): array {
+    return [
+      'langcode' => $langcode,
+      'structureMatch' => FALSE,
+      'structureReason' => 'paragraph structure differs from the default language; sections not imported.',
+      'node' => ['attributes' => ['title' => strtoupper($langcode)]],
+      'paragraphs' => [],
     ];
   }
 
