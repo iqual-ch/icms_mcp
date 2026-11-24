@@ -85,6 +85,10 @@ translation of a flagged node still ends up without sections while the default
 language's list is not empty, its summary entry has `status: error` and an `error`
 text, and the text is also added to the import's `warnings`.
 
+The post-import passes follow the same trees: on a flagged node `rewrite_node_links`
+also rewrites each translation's own sections, and an `update_node_references`
+update with a `langcode` walks its `path` through that translation's own list.
+
 The catalog manifest lists the published items of the paragraphs library
 (`libraryItems`: id, uuid, label, the component each holds and that component's
 title per language). A migration links a source section to the item holding the

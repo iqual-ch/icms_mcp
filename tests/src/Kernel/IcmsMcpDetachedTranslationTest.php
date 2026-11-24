@@ -105,6 +105,19 @@ class IcmsMcpDetachedTranslationTest extends KernelTestBase {
     $this->config('icms_mcp.catalog_descriptions')
       ->set('descriptions', ['paragraph' => ['text' => ['fieldsFromPage' => ['field_topic' => 'field_page_topic']]]])
       ->save();
+    // A reference the final pass (update_node_references) writes.
+    FieldStorageConfig::create([
+      'field_name' => 'field_ref',
+      'entity_type' => 'paragraph',
+      'type' => 'entity_reference',
+      'settings' => ['target_type' => 'node'],
+    ])->save();
+    FieldConfig::create([
+      'field_name' => 'field_ref',
+      'entity_type' => 'paragraph',
+      'bundle' => 'text',
+      'translatable' => TRUE,
+    ])->save();
     $this->createParagraphField('paragraph', 'container', 'field_children');
     // Translatable: the target opted into detached content.
     $this->createParagraphField('node', 'page', self::LAYOUTS);
@@ -327,6 +340,47 @@ class IcmsMcpDetachedTranslationTest extends KernelTestBase {
     $this->assertFalse($summary['it']['paragraphs_translated']);
     $this->assertArrayHasKey('error', $summary['it']);
     $this->assertSame([], $this->ids($this->reload($nid)->getTranslation('it')));
+  }
+
+  /**
+   * The post-import passes reach a detached translation's own sections.
+   *
+   * The link pass (rewrite_node_links) rewrites a link in the Italian tree,
+   * and the reference pass (update_node_references) with `langcode: it`
+   * writes into it — the default language's sections are left alone.
+   */
+  public function testPostImportPassesReachOwnTree(): void {
+    $nid = $this->importDefault();
+    $spec = $this->matchedSpec('it', 'v1');
+    $spec['paragraphs'][1]['attributes']['field_text'] = '<a href="/alt/seite">B (it)</a>';
+    $this->writeTranslations($nid, [$spec]);
+
+    $links = $this->invoke('doRewriteNodeLinks', [$nid, [['from' => '/alt/seite', 'to' => '/node/' . $nid]]]);
+    $this->assertSame('ok', $links['status']);
+    $this->assertSame(1, $links['replaced']);
+    $this->assertSame([], $links['unmatched']);
+
+    $update = [
+      'langcode' => 'it',
+      'path' => [['index' => 1]],
+      'expect_bundle' => 'text',
+      'field' => 'field_ref',
+      'value' => ['target_id' => $nid],
+    ];
+    $references = $this->invoke('doUpdateNodeReferences', [$nid, [$update]]);
+    $this->assertSame('ok', $references['status']);
+    $this->assertSame([], $references['rejected']);
+    $this->assertSame([], $references['unmatched']);
+    $this->assertSame(1, $references['applied']);
+
+    $node = $this->reload($nid);
+    $it_b = $this->rendered($node->getTranslation('it'))[1];
+    $this->assertSame('it', $it_b->language()->getId());
+    $this->assertSame('<a href="/node/' . $nid . '">B (it)</a>', $it_b->get('field_text')->value);
+    $this->assertSame($nid, (int) $it_b->get('field_ref')->target_id);
+    $de_b = $this->rendered($node)[1];
+    $this->assertSame('B', $de_b->get('field_text')->value);
+    $this->assertTrue($de_b->get('field_ref')->isEmpty(), 'The default language is left alone.');
   }
 
   /**

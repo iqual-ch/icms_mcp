@@ -4169,8 +4169,9 @@ final class IcmsMcpOperations {
    * Rewrite links inside an imported node and its layout paragraphs.
    *
    * Every translation of the node and of each paragraph (recursively) is
-   * visited; `href="<from>"` in text fields and link-field uris matching
-   * `<from>` (see LinkRewriter::rewriteUri) become `<to>`. Entities are only
+   * visited — on a detached node also each translation's own tree;
+   * `href="<from>"` in text fields and link-field uris matching `<from>`
+   * (see LinkRewriter::rewriteUri) become `<to>`. Entities are only
    * saved when something changed, inside one transaction; a replacement that
    * matched nothing is listed as unmatched.
    */
@@ -4208,16 +4209,18 @@ final class IcmsMcpOperations {
       $this->rewriteEntityLinks($node, $rules, $matched, $replaced);
       $layouts_field = $this->layoutsFieldName();
       $seen = [];
-      foreach ($this->paragraphsUnder($node, $layouts_field, 0) as $paragraph) {
-        $id = (int) $paragraph->id();
-        if (isset($seen[$id])) {
-          continue;
-        }
-        $seen[$id] = TRUE;
-        $before = $replaced;
-        $this->rewriteEntityLinks($paragraph, $rules, $matched, $replaced);
-        if ($replaced > $before) {
-          $paragraphs_touched++;
+      foreach ($this->paragraphRoots($node, $layouts_field) as $root) {
+        foreach ($this->paragraphsUnder($root, $layouts_field, 0) as $paragraph) {
+          $id = (int) $paragraph->id();
+          if (isset($seen[$id])) {
+            continue;
+          }
+          $seen[$id] = TRUE;
+          $before = $replaced;
+          $this->rewriteEntityLinks($paragraph, $rules, $matched, $replaced);
+          if ($replaced > $before) {
+            $paragraphs_touched++;
+          }
         }
       }
     }
@@ -4233,6 +4236,26 @@ final class IcmsMcpOperations {
       'paragraphs_touched' => $paragraphs_touched,
       'unmatched' => array_values(array_keys(array_filter($matched, fn(int $count): bool => $count === 0))),
     ];
+  }
+
+  /**
+   * The node translations whose paragraph trees a post-import pass walks.
+   *
+   * The default language only, unless the node is detached content: then
+   * every translation owns its own tree (separate paragraph entities, not
+   * translations of the default language's), so each is a root of its own.
+   *
+   * @return \Drupal\node\NodeInterface[]
+   *   The default translation first.
+   */
+  protected function paragraphRoots(NodeInterface $node, string $layouts_field): array {
+    $roots = [$node->getUntranslated()];
+    if (self::isDetachedNode($node, $layouts_field)) {
+      foreach (array_keys($node->getTranslationLanguages(FALSE)) as $langcode) {
+        $roots[] = $node->getTranslation($langcode);
+      }
+    }
+    return $roots;
   }
 
   /**
@@ -4370,7 +4393,9 @@ final class IcmsMcpOperations {
    *   {langcode?, path: [{field?, index}], expect_bundle?, field, value}
    *
    * `path` walks from the node into paragraphs (a step without `field` uses
-   * the layouts field); an empty path addresses the node itself. Only
+   * the layouts field); an empty path addresses the node itself. On a node
+   * flagged as detached content, a path with a `langcode` walks that
+   * translation's own list. Only
    * `entity_reference` and `link` fields are written, only when the value
    * differs, in one transaction. Idempotent.
    */
@@ -4401,7 +4426,18 @@ final class IcmsMcpOperations {
         $field = (string) $update['field'];
         $langcode = (string) ($update['langcode'] ?? '');
         $path = is_array($update['path'] ?? NULL) ? $update['path'] : [];
-        $entity = $this->entityAtPath($node, $path);
+        // On a detached node a language's sections are its own tree: a path
+        // with a langcode walks that translation's list, not the default's.
+        $root = $node;
+        if (
+          $path
+          && $langcode !== ''
+          && $node->hasTranslation($langcode)
+          && self::isDetachedNode($node, $this->layoutsFieldName())
+        ) {
+          $root = $node->getTranslation($langcode);
+        }
+        $entity = $this->entityAtPath($root, $path);
         if ($entity === NULL) {
           $unmatched[] = ['index' => $position, 'field' => $field, 'path' => $path];
           continue;
