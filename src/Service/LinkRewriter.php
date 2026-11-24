@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Drupal\icms_mcp\Service;
 
+use Drupal\Component\Utility\UrlHelper;
+
 /**
  * Pure string rules for rewriting links inside imported content.
  *
@@ -57,7 +59,9 @@ final class LinkRewriter {
       return $to;
     }
     if ($uri === 'internal:' . $from) {
-      return preg_match('#^https?://#i', $to) ? $to : 'internal:' . $to;
+      // Only a bare path, query or fragment is internal; anything else
+      // (`entity:node/5#4711`, an absolute URL) is a uri of its own.
+      return $to !== '' && in_array($to[0], ['/', '?', '#'], TRUE) ? 'internal:' . $to : $to;
     }
     $from_fragment = self::fragment($from);
     $to_fragment = self::fragment($to);
@@ -75,6 +79,98 @@ final class LinkRewriter {
       }
     }
     return NULL;
+  }
+
+  /**
+   * The value a link field can store for a uri, or NULL when there is none.
+   *
+   * A link field holds a URI that `Url::fromUri()` accepts: a scheme
+   * (`https:`, `mailto:`, `entity:node/1`, `route:…`) or `internal:` followed
+   * by a path, query or fragment (`internal:/a`, `internal:?q=1`,
+   * `internal:#top`); protocol-relative `//host/x` passes as is. A bare path,
+   * query or fragment — what a source, or a rewrite to a root-relative file
+   * URL, hands over — gets the `internal:` prefix, and the special paths the
+   * core link widget accepts get what it stores for them (`<front>` →
+   * `internal:/`, `<nolink>` → `route:<nolink>`). What cannot be made valid
+   * (no scheme, a path without a leading slash behind `internal:`, an
+   * external URL behind `internal:`, `entity:` without an id, `route:`
+   * without a name) is NULL: storing it breaks every `Url::fromUri()` on the
+   * entity (entity usage tracking, GraphQL link resolvers). An empty uri
+   * stays empty.
+   *
+   * @param string $uri
+   *   The uri as the import or a link rewrite hands it over.
+   *
+   * @return string|null
+   *   The uri to store, or NULL when the field must not hold it.
+   */
+  public static function linkFieldUri(string $uri): ?string {
+    $uri = trim($uri);
+    if ($uri === '') {
+      return '';
+    }
+    if (str_starts_with($uri, '//')) {
+      return strlen($uri) > 2 && parse_url($uri) !== FALSE ? $uri : NULL;
+    }
+    // What the core link widget stores for its special paths.
+    if (in_array($uri, ['<nolink>', '<none>', '<button>'], TRUE)) {
+      return 'route:' . $uri;
+    }
+    if (str_starts_with($uri, '<front>')) {
+      $uri = '/' . substr($uri, strlen('<front>'));
+    }
+    if (in_array($uri[0], ['/', '?', '#'], TRUE)) {
+      $uri = 'internal:' . $uri;
+    }
+    // Url::fromUri() reads `base:2024/x` as host and port; it prefixes a
+    // slash first, and so does this check.
+    $parts = parse_url((string) preg_replace('/^base:(\d)/', 'base:/$1', $uri));
+    if ($parts === FALSE || empty($parts['scheme'])) {
+      return NULL;
+    }
+    $rest = substr($uri, strlen($parts['scheme']) + 1);
+    // The part before the query and fragment.
+    $path = substr($rest, 0, strcspn($rest, '?#'));
+    switch (strtolower($parts['scheme'])) {
+      case 'internal':
+        if ($path === '') {
+          return 'internal:' . $rest;
+        }
+        // Without a leading slash it is no path (`internal:entity:node/5`,
+        // `internal:www.example.com`), and guessing one makes a wrong link.
+        // `internal://host/x` and `internal:/https://host/x` name another
+        // site: Url::fromUri() rejects an external URL behind `internal:`.
+        if ($path[0] !== '/' || str_starts_with($path, '//') || UrlHelper::isExternal(substr($path, 1))) {
+          return NULL;
+        }
+        return 'internal:' . $rest;
+
+      case 'entity':
+        return preg_match('#^[a-z0-9_]+/[^/]+$#', $path) ? $uri : NULL;
+
+      case 'route':
+        return strcspn($path, ';') > 0 ? $uri : NULL;
+
+      default:
+        return $uri;
+    }
+  }
+
+  /**
+   * Why a uri linkFieldUri() refused is invalid, for a warning.
+   *
+   * @param string $uri
+   *   The refused uri.
+   *
+   * @return string
+   *   A short reason, ending without a full stop.
+   */
+  public static function invalidUriReason(string $uri): string {
+    $reason = 'not a valid link-field URI';
+    if (str_starts_with(strtolower(trim($uri)), 'tel:')) {
+      $reason .= ' (a short number such as tel:117 reads as host and port; write it as tel:+41… or as text)';
+    }
+    return $reason;
   }
 
   /**
