@@ -49,6 +49,7 @@ chosen by the spec, never by the field's translatability alone:
 | Spec | Written as | Summary `paragraphs_mode` |
 | --- | --- | --- |
 | `structureMatch: true` | into translations of the **shared** paragraph entities, by position, after a structure re-check | `symmetric` |
+| `structureMatch: true` on a node flagged `icms_detached_content` | its **own** tree, built from the same specs as `mode: "detached"` (see below) | `detached`, with a `note` |
 | `mode: "detached"` | its **own** single-language paragraph tree on the translation's field rows (ICMS detached content, ICMS-768 — unreleased) | `detached` |
 | neither | scalar node fields only, with the `reason` | `shared` |
 
@@ -64,6 +65,17 @@ saved once empty before its paragraphs are set, so the ICMS hook has nothing to
 clone and the imported list is the one that stays. On a target that ships detached content the
 field is translatable for every page: an attached page still takes the
 symmetric path, which is why `structureMatch` decides and not the field.
+
+On a flagged node every translation renders its own list, so a structure-matched
+language there is written as its own tree too, never into the original's shared
+paragraphs (where its text would not show). Fields the project fills from the page
+(`fieldsFromPage`) come from that language's page. A re-import replaces each
+language's own tree and deletes the translation's previous root paragraphs (with
+all their revisions), as the default-language import does with its own; paragraphs
+the default language references are never deleted. A tree the target cannot hold
+(an unknown field or bundle, nesting deeper than 8) costs that language's sections
+only: its paragraphs roll back, the page and the other languages are still
+imported, and the summary entry gives the `reason`.
 
 The catalog manifest lists the published items of the paragraphs library
 (`libraryItems`: id, uuid, label, the component each holds and that component's

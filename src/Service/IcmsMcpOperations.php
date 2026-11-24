@@ -8,6 +8,7 @@ use Drupal\icms_mcp\Catalog\IcmsCatalogBuilder;
 use Drupal\Component\Datetime\TimeInterface;
 use Drupal\Core\Database\Connection;
 use Drupal\Core\Entity\EntityFieldManagerInterface;
+use Drupal\Core\Entity\EntityStorageInterface;
 use Drupal\Core\Entity\EntityTypeBundleInfoInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Extension\ModuleHandlerInterface;
@@ -18,6 +19,7 @@ use Drupal\Core\File\FileUrlGeneratorInterface;
 use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\Core\Lock\LockBackendInterface;
 use Drupal\language\ConfigurableLanguageManagerInterface;
+use Drupal\node\NodeInterface;
 use Drupal\Core\State\StateInterface;
 use GuzzleHttp\ClientInterface;
 use Psr\Log\LoggerInterface;
@@ -2229,9 +2231,20 @@ final class IcmsMcpOperations {
    * flagged `icms_detached_content` by the default-language import — the
    * ICMS presave hook mirrors the original's list over every translation of
    * an attached node, so without the flag the per-language set would not
-   * survive the next save. The mode is chosen by the spec, never by the
-   * field's translatability alone: on a target with detached content the field is translatable
-   * for every page, and attached pages must still translate in place.
+   * survive the next save. The mode is chosen by the spec and the node's
+   * flag, never by the field's translatability alone: on a target with
+   * detached content the field is translatable for every page, and attached
+   * pages must still translate in place.
+   *
+   * On a node that IS flagged, a structure-matched (`structureMatch: true`)
+   * translation is written the detached way too, built from the same specs:
+   * each translation renders its own list there, so text written into the
+   * original's shared paragraphs would never reach it — and a new
+   * translation would be saved with no sections at all (the ICMS presave
+   * hook clones the new translation's own, empty, list). Summary:
+   * `paragraphs_mode: detached` with a `note`. A language's own tree that
+   * fails to build rolls back to a savepoint and costs that language's
+   * sections only (summary `reason`), never the page.
    *
    * @param int $nid
    *   The saved default-language node ID.
@@ -2255,6 +2268,11 @@ final class IcmsMcpOperations {
       ? $this->entityTypeManager->getStorage('paragraph')
       : NULL;
     $layouts_field = $this->layoutsFieldName();
+    // A node flagged as detached content (by the default-language import)
+    // gives every translation its own paragraph tree: the ICMS presave hook
+    // stops mirroring the original's list and clones it only into a NEW
+    // translation — from whatever that translation's field holds.
+    $node_detached = self::isDetachedNode($node, $layouts_field);
 
     $summary = [];
     foreach ($translations as $translation_spec) {
@@ -2295,6 +2313,8 @@ final class IcmsMcpOperations {
         : [];
       $paragraphs_translated = FALSE;
       $paragraphs_mode = 'shared';
+      $paragraphs_note = NULL;
+      $own_tree_reason = NULL;
       $symmetric_reason = NULL;
       $structure_partial = [];
       $untranslated_fields = [];
@@ -2308,6 +2328,7 @@ final class IcmsMcpOperations {
       $mode = self::translationParagraphMode(
         $translation_spec,
         $field_definition !== NULL && $field_definition->isTranslatable(),
+        $node_detached,
       );
       $detached_reason = NULL;
       if ($mode === 'detached_unsupported') {
@@ -2323,59 +2344,51 @@ final class IcmsMcpOperations {
       }
 
       if ($mode === 'detached' && $paragraph_specs && $paragraph_storage !== NULL) {
-        // A translation added in this call is saved once empty first: the
-        // ICMS presave hook clones the original's tree into every NEW
-        // translation of a detached node, and it would clone — and orphan —
-        // the paragraphs created below if they were already on the field.
-        // Saved with no rows, the hook finds nothing to clone; the second
-        // save then keeps the imported list (not new, shares nothing).
-        if (!$exists) {
-          $translation->set($layouts_field, []);
-          $translation->save();
-        }
-        // The translation's previous rows are replaced and deleted after the
-        // save — unless they are the default language's own paragraphs (a
-        // translation that was still mirrored, on a target without the
-        // presave clone): deleting those would empty the original.
-        $shared_ids = [];
-        foreach ($node->getUntranslated()->get($layouts_field) as $item) {
-          $target_id = (int) ($item->target_id ?? 0);
-          if ($target_id > 0) {
-            $shared_ids[$target_id] = $target_id;
-          }
-        }
-        foreach ($translation->get($layouts_field) as $item) {
-          $target_id = (int) ($item->target_id ?? 0);
-          if ($target_id > 0 && !isset($shared_ids[$target_id])) {
-            $old_ref_ids[$target_id] = $target_id;
-          }
-        }
-        $created = [];
-        $child_paragraph_count = 0;
-        foreach ($this->sortParagraphsBySequence($paragraph_specs) as $para) {
-          $entity = $this->createParagraphFromSpec(
-            [
-              'type' => $para['type'] ?? '',
-              'fields' => $para['attributes'] ?? [],
-              'options' => $para['options'] ?? [],
-              'status' => $para['status'] ?? NULL,
-            ],
+        // One language's tree that the target cannot hold (an unknown field,
+        // a bad bundle, too deep) costs that language's sections only, never
+        // the page: its half-built paragraphs (and their media) roll back to
+        // this savepoint and the translation is reported with the reason.
+        $report_before = [$this->mediaReport, $this->mediaWarnings, $media_count];
+        // Autogenerated savepoint name: a language code such as pt-br is not
+        // a valid SQL identifier.
+        $savepoint = $this->database->startTransaction();
+        try {
+          $old_ref_ids = $this->writeOwnParagraphTree(
+            $node,
+            $translation,
+            $exists,
+            $layouts_field,
+            $paragraph_specs,
             $paragraph_storage,
-            $child_paragraph_count,
             $media_count,
           );
-          if ($entity->hasField('langcode')) {
-            $entity->set('langcode', $langcode);
-            $entity->save();
+          unset($savepoint);
+          $paragraphs_translated = TRUE;
+          $paragraphs_mode = 'detached';
+          if (($translation_spec['mode'] ?? NULL) !== 'detached') {
+            // Structure-matched, but the node is detached content: writing
+            // into the original's shared paragraphs would never reach this
+            // language's own list. Built from the same specs instead.
+            $paragraphs_note = 'Structure matches the default language; written as this language\'s own sections because the node is detached content (' . self::DETACHED_CONTENT_FLAG . ').';
           }
-          $created[] = [
-            'target_id' => $entity->id(),
-            'target_revision_id' => $entity->getRevisionId(),
-          ];
         }
-        $translation->set($layouts_field, $created);
-        $paragraphs_translated = TRUE;
-        $paragraphs_mode = 'detached';
+        catch (\Throwable $e) {
+          $savepoint->rollBack();
+          unset($savepoint);
+          [$this->mediaReport, $this->mediaWarnings, $media_count] = $report_before;
+          $old_ref_ids = [];
+          foreach (['paragraph', 'media', 'file'] as $entity_type_id) {
+            if ($this->entityTypeManager->hasDefinition($entity_type_id)) {
+              $this->entityTypeManager->getStorage($entity_type_id)->resetCache();
+            }
+          }
+          $own_tree_reason = $e->getMessage();
+          $this->logger->warning('icms_mcp: sections of translation @langcode of node @nid not written: @msg', [
+            '@langcode' => $langcode,
+            '@nid' => $nid,
+            '@msg' => $own_tree_reason,
+          ]);
+        }
       }
       elseif (
         $mode === 'symmetric'
@@ -2438,8 +2451,14 @@ final class IcmsMcpOperations {
         'paragraphs_mode' => $paragraphs_mode,
         'media_count' => $media_count,
       ];
+      if ($paragraphs_note !== NULL) {
+        $entry['note'] = $paragraphs_note;
+      }
       if ($detached_reason !== NULL) {
         $entry['reason'] = $detached_reason;
+      }
+      elseif ($own_tree_reason !== NULL) {
+        $entry['reason'] = "This language's own sections could not be written ({$own_tree_reason}); scalar fields were translated.";
       }
       elseif (($translation_spec['structureMatch'] ?? NULL) === FALSE) {
         $entry['reason'] = (string) ($translation_spec['structureReason']
@@ -2484,23 +2503,142 @@ final class IcmsMcpOperations {
    *   translatable — the translation gets its own single-language tree.
    * - `detached_unsupported`: the spec asks for it but the field cannot hold
    *   per-language rows — scalar fields only, with the reason reported.
-   * - `symmetric`: `structureMatch: true` — written into translations of the
-   *   shared paragraphs by position, whether or not the field is translatable.
+   * - `symmetric`: `structureMatch: true` on an attached node — written into
+   *   translations of the shared paragraphs by position, whether or not the
+   *   field is translatable.
+   * - `detached` as well for `structureMatch: true` on a node flagged
+   *   `icms_detached_content` with a translatable field: there every
+   *   translation renders its own list, so writing into the original's
+   *   shared paragraphs would never reach this language. The matched specs
+   *   have the same shape and build the language's own tree.
    * - `shared`: nothing is written to paragraphs.
    *
-   * The field's translatability alone never selects a per-language set: on an
-   * target with detached content every page's field is translatable and attached pages are
-   * mirrored from the original on save, so a per-language set written without
-   * the detached flag would be replaced by the next editorial save.
+   * The field's translatability alone never selects a per-language set: on a
+   * target with detached content every page's field is translatable and
+   * attached pages are mirrored from the original on save, so a per-language
+   * set written without the detached flag would be replaced by the next
+   * editorial save. Only the node's flag (`$node_detached`) does.
    */
-  public static function translationParagraphMode(array $spec, bool $field_translatable): string {
+  public static function translationParagraphMode(array $spec, bool $field_translatable, bool $node_detached = FALSE): string {
     if (($spec['mode'] ?? NULL) === 'detached') {
       return $field_translatable ? 'detached' : 'detached_unsupported';
     }
     if (($spec['structureMatch'] ?? NULL) === TRUE) {
-      return 'symmetric';
+      return $node_detached && $field_translatable ? 'detached' : 'symmetric';
     }
     return 'shared';
+  }
+
+  /**
+   * Whether the node's translations own their paragraph lists.
+   *
+   * TRUE when the node carries the ICMS detached-content flag set to TRUE
+   * and its layouts field is translatable — the two conditions under which
+   * the ICMS presave hook keeps a per-language list instead of mirroring
+   * the original's.
+   */
+  protected static function isDetachedNode(NodeInterface $node, string $layouts_field): bool {
+    return $node->hasField(self::DETACHED_CONTENT_FLAG)
+      && (bool) $node->get(self::DETACHED_CONTENT_FLAG)->value
+      && $node->hasField($layouts_field)
+      && $node->getFieldDefinition($layouts_field)->isTranslatable();
+  }
+
+  /**
+   * Give a translation of a detached node its own paragraph tree.
+   *
+   * The paragraphs are created as single-language entities in the
+   * translation's language and set on the translation's own field rows. They
+   * are all created before the translation is touched, so a spec the target
+   * cannot hold throws while the node is unchanged in memory (the caller
+   * rolls the created entities back). The translation is not saved here
+   * (except the empty first save of a new translation, see below); the
+   * caller saves it and then deletes the returned previous paragraphs.
+   *
+   * @param \Drupal\node\NodeInterface $node
+   *   The default-language node.
+   * @param \Drupal\node\NodeInterface $translation
+   *   The translation that gets the tree.
+   * @param bool $exists
+   *   Whether the translation existed before this import.
+   * @param string $layouts_field
+   *   The layouts field name.
+   * @param array $paragraph_specs
+   *   The translation's top-level paragraph specs.
+   * @param \Drupal\Core\Entity\EntityStorageInterface $paragraph_storage
+   *   The paragraph storage.
+   * @param int $media_count
+   *   Media counter, incremented for media the paragraphs reference.
+   *
+   * @return int[]
+   *   IDs of the translation's previous paragraphs, to delete after the save.
+   *   Paragraphs the default language references are never included.
+   */
+  protected function writeOwnParagraphTree(
+    NodeInterface $node,
+    NodeInterface $translation,
+    bool $exists,
+    string $layouts_field,
+    array $paragraph_specs,
+    EntityStorageInterface $paragraph_storage,
+    int &$media_count,
+  ): array {
+    $langcode = $translation->language()->getId();
+    $created = [];
+    $child_paragraph_count = 0;
+    foreach ($this->sortParagraphsBySequence($paragraph_specs) as $para) {
+      // Born in the translation's language, nested children included.
+      $entity = $this->createParagraphFromSpec(
+        [
+          'type' => $para['type'] ?? '',
+          'fields' => $para['attributes'] ?? $para['fields'] ?? [],
+          'options' => $para['options'] ?? [],
+          'status' => $para['status'] ?? NULL,
+        ],
+        $paragraph_storage,
+        $child_paragraph_count,
+        $media_count,
+        0,
+        $langcode,
+      );
+      // As on the default-language page: fields the project fills from the
+      // page, here from this language's page.
+      $this->copyFieldsFromPage($entity, $translation);
+      $created[] = [
+        'target_id' => $entity->id(),
+        'target_revision_id' => $entity->getRevisionId(),
+      ];
+    }
+    // A translation added in this call is saved once empty first: the ICMS
+    // presave hook clones the original's tree into every NEW translation of
+    // a detached node, and it would clone — and orphan — the paragraphs
+    // created above if they were already on the field. Saved with no rows,
+    // the hook finds nothing to clone; the caller's save then keeps the
+    // imported list (not new, shares nothing).
+    if (!$exists) {
+      $translation->set($layouts_field, []);
+      $translation->save();
+    }
+    // The translation's previous rows are replaced and deleted after the
+    // save — unless they are the default language's own paragraphs (a
+    // translation that still shares the original's list): deleting those
+    // would empty the original.
+    $shared_ids = [];
+    foreach ($node->getUntranslated()->get($layouts_field) as $item) {
+      $target_id = (int) ($item->target_id ?? 0);
+      if ($target_id > 0) {
+        $shared_ids[$target_id] = $target_id;
+      }
+    }
+    $old_ref_ids = [];
+    foreach ($translation->get($layouts_field) as $item) {
+      $target_id = (int) ($item->target_id ?? 0);
+      if ($target_id > 0 && !isset($shared_ids[$target_id])) {
+        $old_ref_ids[$target_id] = $target_id;
+      }
+    }
+    $translation->set($layouts_field, $created);
+    return $old_ref_ids;
   }
 
   /**
