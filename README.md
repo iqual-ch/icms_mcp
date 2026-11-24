@@ -18,7 +18,7 @@ Tools (`src/Plugin/mcp_server/Tool/`), advertised under their tool id:
 | `import_menu_links`      | Upsert one menu's links, parents before children; node links resolve via the source-key field, and a parent whose page is missing is kept disabled so its children keep their place. A link the target already has under the same parent (same page, or same title) is taken over instead of doubled: its target is corrected when wrong, nothing else is changed (`action: matched` / `relinked`). Step 3, after nodes. |
 | `lookup_existing_node`   | The node an import of a source page would land on: by canonical source URL (the source-key field), and with `path_alias` / `is_front_page` also a page built by hand at the same path (`matched_by: alias \| front_page \| adopted`). |
 | `get_icms_layout_examples` | Read-only: the site's reference examples of each layout bundle and option combination, from the showcase page declared in `icms_mcp.catalog_examples` and its menu children. `{indexHash, pages, examples: [{id, paragraphId, bundle, options, storedOptions, pagePath, ordinal, siblingCount, title, children, references?}], skipped}`. `references` (`{field: [nid]}`) names the public pages a layout lists by reference, for a preview that needs pages to show before the real ones exist. |
-| `rewrite_node_links`     | Post-import pass: `{from, to}` replacements applied to `href`s in text fields and link-field uris (exact, or by resolved `#fragment`) on the node, its translations and its paragraphs. Anchors → `#<paragraph id>`, document links → the stored file's URL. |
+| `rewrite_node_links`     | Post-import pass: `{from, to}` replacements applied to `href`s in text fields and link-field uris (exact, or by resolved `#fragment`) on the node, its translations and its paragraphs. Anchors → `#<paragraph id>`, document links → the stored file's URL. A link-field uri is stored only in a form `Url::fromUri()` accepts (see *Link fields*). |
 | `set_front_page`         | Make an imported, published node the site front page (`system.site page.front`). |
 | `delete_preview_pages`   | Delete the preview pages of one scope (see *Preview pages*). |
 | `update_node_references` | Final reference pass: path-addressed write of `entity_reference` / `link` fields on the node or a (nested) paragraph (`{langcode?, path: [{field?, index}], expect_bundle?, field, value}`), translation-aware, saved only on change, one transaction, idempotent. Lets a page imported before the pages it references get its teasers and buttons without a re-import (which would recreate paragraph ids). |
@@ -36,6 +36,17 @@ response), and reused by source URL on re-runs. `pivot.target.linkedDocuments
 [{src, title}]` — files only linked from text — are created as unplaced document
 media. A translation's paragraph `status` is applied per language.
 
+**Link fields.** Every writer (`import_pivot` for node fields, the default language,
+translations and nested paragraphs, `rewrite_node_links`, `update_node_references`,
+`import_menu_links`) stores a link uri only in a form `Url::fromUri()` accepts. A bare
+path, query or fragment (`/sites/default/files/x.pdf`, `?page=2`, `#4711`) gets
+`internal:`; `<front>`, `<nolink>`, `<none>` and `<button>` become what the core link
+widget stores (`internal:/`, `route:<nolink>`, …). A value that cannot be made valid
+(`www.example.com`, `internal:entity:node/5`, `internal:https://…`, `entity:node/`,
+`tel:117`) is left out and named in `warnings` (`import_pivot`, `rewrite_node_links`),
+`rejected` (`update_node_references`) or as an `unresolved` link (`import_menu_links`). `rewrite_node_links` also heals bare uris an earlier run
+left behind on the entities it walks (`normalized`).
+
 The catalog also carries `editorTextStyles`: per text format, the CKEditor 5 style
 plugin's styles (label, tag, classes) and the classes the format allows on text tags —
 what a source's `lead` / `small` / blockquote text can bind to, and what a design
@@ -49,8 +60,9 @@ chosen by the spec, never by the field's translatability alone:
 | Spec | Written as | Summary `paragraphs_mode` |
 | --- | --- | --- |
 | `structureMatch: true` | into translations of the **shared** paragraph entities, by position, after a structure re-check | `symmetric` |
+| `structureMatch: true` on a node flagged `icms_detached_content` | its **own** tree, built from the same specs as `mode: "detached"` (see below) | `detached`, with a `note` |
 | `mode: "detached"` | its **own** single-language paragraph tree on the translation's field rows (ICMS detached content, ICMS-768 — unreleased) | `detached` |
-| neither | scalar node fields only, with the `reason` | `shared` |
+| neither | scalar node fields only, with the `reason` | `shared` (`cloned` on a flagged node, see below) |
 
 Detached needs two things on the target, both reported by the catalog: the bundle's
 layouts field translatable (`nodeTypes.<bundle>.paragraphsFieldTranslatable`) and the
@@ -64,6 +76,29 @@ saved once empty before its paragraphs are set, so the ICMS hook has nothing to
 clone and the imported list is the one that stays. On a target that ships detached content the
 field is translatable for every page: an attached page still takes the
 symmetric path, which is why `structureMatch` decides and not the field.
+
+On a flagged node every translation renders its own list, so a structure-matched
+language there is written as its own tree too, never into the original's shared
+paragraphs (where its text would not show). Fields the project fills from the page
+(`fieldsFromPage`) come from that language's page. A re-import replaces each
+language's own tree and deletes the translation's previous root paragraphs (with
+all their revisions), as the default-language import does with its own; paragraphs
+the default language references are never deleted. A tree the target cannot hold
+(an unknown field or bundle, nesting deeper than 8) costs that language's sections
+only: its paragraphs roll back, the page and the other languages are still
+imported, and the summary entry gives the `reason`.
+
+A translation of a flagged node that has no sections of its own (`structureMatch:
+false`, no paragraphs, an unstamped spec, or a tree that failed as above) is never
+saved empty: it gets the default language's sections, which ICMS clones into its
+language (`paragraphs_mode: cloned`, untranslated text, with a `note`). If a
+translation of a flagged node still ends up without sections while the default
+language's list is not empty, its summary entry has `status: error` and an `error`
+text, and the text is also added to the import's `warnings`.
+
+The post-import passes follow the same trees: on a flagged node `rewrite_node_links`
+also rewrites each translation's own sections, and an `update_node_references`
+update with a `langcode` walks its `path` through that translation's own list.
 
 The catalog manifest lists the published items of the paragraphs library
 (`libraryItems`: id, uuid, label, the component each holds and that component's

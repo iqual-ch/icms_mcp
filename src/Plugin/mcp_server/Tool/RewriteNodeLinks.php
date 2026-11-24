@@ -17,7 +17,7 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 #[Tool(
   id: 'rewrite_node_links',
   label: new TranslatableMarkup('Rewrite node links'),
-  description: new TranslatableMarkup('Post-import pass: replace links inside an imported node (every translation, layout paragraphs recursively). Each replacement {from, to} rewrites href="<from>" in text fields and link-field uris equal to <from> or ending in its #fragment (entity:node/12#anchor → entity:node/12#4711). Idempotent. Returns {status, nid, replaced, paragraphs_touched, unmatched}.'),
+  description: new TranslatableMarkup('Post-import pass: replace links inside an imported node (every translation, layout paragraphs recursively). Each replacement {from, to} rewrites href="<from>" in text fields and link-field uris equal to <from> or ending in its #fragment (entity:node/12#anchor → entity:node/12#4711). Link-field uris are stored as Url::fromUri() accepts them: a root-relative result (/sites/default/files/x.pdf, #4711) gets internal:, a bare uri an earlier run left is healed (normalized), a replacement that cannot be stored is not applied and named in warnings. Idempotent. Returns {status, nid, replaced, normalized, paragraphs_touched, unmatched, warnings?}.'),
   inputSchema: [
     'type' => 'object',
     'properties' => [
