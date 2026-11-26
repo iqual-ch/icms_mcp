@@ -65,6 +65,44 @@ clone and the imported list is the one that stays. On a target that ships detach
 field is translatable for every page: an attached page still takes the
 symmetric path, which is why `structureMatch` decides and not the field.
 
+### Meta tags
+
+A node field of type `metatag` (drupal/metatag; ICMS calls it `field_metatags`, any
+name works) is written from `node.attributes` and from each translation's
+`node.attributes`, so every language can carry its own tags. Accepted values:
+
+- a map `{"description": "…", "og:title": "…"}`: tag name to a string, or to an array
+  of strings (Metatag's own shape for `robots`); nothing deeper, no numbers or booleans,
+  all UTF-8,
+- a list with one item `{"value": <map or encoded string>}`,
+- an encoded string (what the field stores); it must decode to such a map.
+
+A bare map whose only key is `value` is read as an unwrapped field item and unwrapped
+(a tag really named `value` is never stored). The import stores the encoded map in
+`value`. An empty map, `null` or `""` clears the field. A translation without the
+attribute has an empty field (it does not inherit the default language's tags).
+
+`validate_pivot` and `import_pivot` reject anything else with `invalid_metatag`, for the
+node (`/drupal_import/node/attributes/<field>`) and for each translation
+(`/drupal_import/translations/<n>/node/attributes/<field>`), before anything is written.
+Validation does not cover values that cannot be encoded after decoding; those throw at
+write time with the field, bundle and language in the message. A value that fails to
+encode is never turned into an empty one.
+
+`read_node` returns the field as the decoded map. An unset field reads as an empty PHP
+array, which JSON-encodes as `[]` (not `{}`): treat `[]` and `{}` as the same empty map.
+The read-back can differ from what was sent: Metatag's `preSave` drops tags equal to its
+defaults for the entity and sorts the tags by key, so compare maps without order and
+expect default-equal tags to be missing. The computed field named `metatag` stays out of
+the read-back. The catalog advertises the capability as `metatagFields.supported` (true
+when the `metatag` module is installed; additive to `icms-target-catalog-v3` like
+`detachedContent`: the format name stays, `catalogHash` changes).
+
+Tests: `tests/src/Unit/MetatagValueTest.php` runs anywhere. The kernel test
+`tests/src/Kernel/IcmsMcpMetatagFieldTest.php` needs drupal/metatag, drupal/token and
+the paragraphs stack, none a Composer dependency of this module: it skips itself when
+one is missing, so run it from an ICMS project.
+
 The catalog manifest lists the published items of the paragraphs library
 (`libraryItems`: id, uuid, label, the component each holds and that component's
 title per language). A migration links a source section to the item holding the

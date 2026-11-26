@@ -435,6 +435,9 @@ final class IcmsCatalogBuilder {
       // tell whether a page may own a paragraph tree per language
       // (ICMS-768, unreleased) before it imports one. Absent = cannot verify.
       'detachedContent' => $this->detachedContent(),
+      // Additive to v3, same precedent: `supported` says the import writes a
+      // `metatag` field (any name) from a tag map. Absent = it does not.
+      'metatagFields' => ['supported' => $this->moduleHandler->moduleExists('metatag')],
       'roles' => $this->roles(),
       'menus' => $this->menus(),
       // The target's webforms, for the section gate's "bind to" dropdown, and
