@@ -412,6 +412,22 @@ final class IcmsMcpOperations {
         }
         $this->validateStructuredField($node_defs[$name], $value, "/drupal_import/node/attributes/{$name}", $para_bundles, $issues);
       }
+      // A translation's metatag value is checked here too: found at write time
+      // it would roll back the whole page.
+      foreach ((is_array($import['translations'] ?? NULL) ? $import['translations'] : []) as $t => $translation_spec) {
+        $translation_attrs = is_array($translation_spec['node']['attributes'] ?? NULL) ? $translation_spec['node']['attributes'] : [];
+        foreach ($translation_attrs as $name => $value) {
+          if (isset($node_defs[$name]) && $node_defs[$name]->getType() === MetatagValue::FIELD_TYPE) {
+            $this->validateStructuredField(
+              $node_defs[$name],
+              $value,
+              "/drupal_import/translations/{$t}/node/attributes/{$name}",
+              $para_bundles,
+              $issues,
+            );
+          }
+        }
+      }
     }
 
     $paragraphs = $import['paragraphs'] ?? [];
@@ -2941,6 +2957,24 @@ final class IcmsMcpOperations {
       return;
     }
 
+    if ($field_type === MetatagValue::FIELD_TYPE) {
+      // One encoded map in `value`; an empty map or NULL clears the field.
+      try {
+        $entity->set($name, MetatagValue::items(MetatagValue::normalize($value)));
+      }
+      catch (\InvalidArgumentException $e) {
+        throw new \InvalidArgumentException(sprintf(
+          "Field '%s' on %s:%s (%s) takes meta tags: %s",
+          $name,
+          $entity->getEntityTypeId(),
+          $entity->bundle(),
+          $entity->language()->getId(),
+          $e->getMessage(),
+        ), 0, $e);
+      }
+      return;
+    }
+
     $entity->set($name, $this->normalizeFieldValue($definition, $value));
   }
 
@@ -3790,6 +3824,16 @@ final class IcmsMcpOperations {
         if (!(is_int($raw) || (is_string($raw) && ctype_digit($raw)))) {
           $issues[] = ['path' => "{$path}/{$index}", 'code' => 'invalid_timestamp', 'message' => "Field '{$definition->getName()}' takes a unix timestamp (integer seconds)."];
         }
+      }
+    }
+    elseif ($field_type === MetatagValue::FIELD_TYPE) {
+      $problem = MetatagValue::check($value);
+      if ($problem !== NULL) {
+        $issues[] = [
+          'path' => $path,
+          'code' => 'invalid_metatag',
+          'message' => "Field '{$definition->getName()}' takes meta tags: {$problem}",
+        ];
       }
     }
     elseif ($field_type === 'boolean') {

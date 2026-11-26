@@ -56,6 +56,10 @@ final class FieldValueReader {
   public static function read(FieldItemListInterface $items): array {
     $definition = $items->getFieldDefinition();
     $type = $definition->getType();
+    if ($type === MetatagValue::FIELD_TYPE) {
+      // The decoded tag map, as the pivot sends it (empty when unset).
+      return MetatagValue::decode($items->isEmpty() ? NULL : $items->first()->getValue()['value'] ?? NULL);
+    }
     $values = [];
     foreach ($items as $item) {
       $raw = $item->getValue();
